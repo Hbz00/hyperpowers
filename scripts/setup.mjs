@@ -83,7 +83,13 @@ emitJson({
     ? 'Hyperpowers is configured and its environment is in force. Run /hyperpowers:feature.'
     : !apply
       ? 'This was a dry run. Re-run with --apply to write these changes.'
-      : 'Settings written. RESTART the Claude Code session — environment variables are read at startup, so they are not in force until you do. Then run /hyperpowers:feature; preflight will confirm the contract.',
+      // `active` is read from *this* subprocess's environment, which was spawned before the file
+      // existed — so on a first install it is false whether or not a restart is actually needed,
+      // and telling the user to restart is a guess dressed as a measurement. Observed on a
+      // third-party machine: setup reported `restartRequired: true`, and preflight — a later
+      // subprocess in the same session — measured the contract already in force. Only a process
+      // spawned after the write can answer this, so say what to run instead of what to do.
+      : 'Settings written. Now run preflight: if it reports the environment contract in force, this session is ready and no restart is needed. If it reports the contract missing, restart Claude Code and run it again.',
   verifyWith: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/preflight.mjs"',
 });
 

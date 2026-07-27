@@ -58,6 +58,17 @@ reason, which is a better outcome than a confident `COMPLETE` on unproven work.
 - **Degrade silently.** An unavailable model either falls back along one documented path, recorded,
   or stops the run.
 
+One side effect worth knowing before you install: `/hyperpowers:setup` disables Claude Code's
+advisor tool for the project, so that escalation goes up this plugin's ladder and lands in its
+ledger. Unlike the Git policy, that applies to **every** session in the project, not only to
+Hyperpowers runs. Remove `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` from `.claude/settings.json` if you
+would rather keep it — nothing else depends on it.
+
+Install it *before* the session you intend to run it in. Its `SessionStart` hook stamps the
+directory the hooks and the CLI scripts must agree on, so a plugin installed mid-session fails
+preflight's `plugin-data-agreement` check until you restart. That check exists because the two
+halves disagreeing is a silent failure: Git mutations go unblocked and the run still looks healthy.
+
 ## When not to use it
 
 The architecture has a **floor**, and the honest way to state it is in time. Measured across three

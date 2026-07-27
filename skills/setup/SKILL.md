@@ -42,7 +42,7 @@ Existing settings are preserved and backed up. Use `--scope local` to write
 | --- | --- | --- |
 | `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `2` | Caps delegation at Fable → Opus → Sonnet. The harness default is 3, so this genuinely tightens it, and makes deeper spawning a hard error rather than a request the model can talk past. |
 | `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` | `200` | A whole feature runs inside one turn, so the consecutive-block cap must cover the run. The default of 8 would truncate almost immediately. |
-| `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` | `1` | Hyperpowers has its own escalation ladder; a second advisor would arbitrate outside the ledger. |
+| `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` | `1` | Hyperpowers has its own escalation ladder; a second advisor would arbitrate outside the ledger. **This one applies to every session in the project, not only to Hyperpowers runs** — tell the user, and drop this key if they would rather keep the advisor. |
 | `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS` | `1` | Removes the built-in commit and PR guidance, which contradicts the read-only Git policy. |
 | `CLAUDE_CODE_DISABLE_WORKFLOWS` | `1` | Workflow orchestration would run outside the state machine and outside its accounting. |
 | `disableWorkflows` | `true` | The documented settings-level equivalent. |
