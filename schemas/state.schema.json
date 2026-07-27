@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hyperpowers run state",
+  "description": "Persisted at ${CLAUDE_PLUGIN_DATA}/projects/<project>/runs/<run-id>/state.json. This file is the run: it survives compaction, session loss and restarts, and is the only thing /hyperpowers:resume needs (spec \u00a723 Risk 7).",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "runId",
+    "sessionId",
+    "projectRoot",
+    "phase",
+    "revision",
+    "createdAt",
+    "updatedAt",
+    "history",
+    "counters"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "runId": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "projectRoot": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "updatedAt": {
+      "type": "string"
+    },
+    "phase": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic mutation counter. Deliberately NOT part of the progress signature: recording a stall is itself a mutation, so including it made the signature change on every observation and stall detection could never fire (see progressSignature in scripts/lib/state.mjs)."
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "config": {
+      "type": "object"
+    },
+    "observedEffort": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Effort the harness reported in the Stop payload. Compared with the requested effort to catch silent downgrades (ledger A3)."
+    },
+    "history": {
+      "type": "array",
+      "description": "Spec \u00a711: every transition records who, when, what artefact, what proof, what cost, which fallbacks and what remains open.",
+      "items": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "at",
+          "actor"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "artifact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cost": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "openProblems": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "counters": {
+      "type": "object",
+      "properties": {
+        "workPackages": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fallbacks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "codexInvocations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retries": {
+          "type": "object"
+        },
+        "extraReviews": {
+          "type": "object",
+          "description": "Extra \u00a718 review rounds used, keyed by artefact. Bounded by maxExtraReviewsPerArtifact and enforced by the Codex adapter."
+        },
+        "subagentsCompleted": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reviews": {
+      "type": "object"
+    },
+    "adjudications": {
+      "type": "object"
+    },
+    "gates": {
+      "type": "object"
+    },
+    "openBlockers": {
+      "type": "array"
+    },
+    "residualRisks": {
+      "type": "array",
+      "description": "Risks accepted rather than fixed. Written by `state-machine.mjs risk --add`; surfaced in the completion gate summary and the final report.",
+      "items": {
+        "type": "object",
+        "required": [
+          "at",
+          "risk"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Finding id or artefact the risk came from."
+          }
+        }
+      }
+    },
+    "stall": {
+      "type": "object",
+      "properties": {
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "type": "integer"
+        },
+        "lastAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "turn": {
+      "type": "object",
+      "properties": {
+        "promptId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blocks": {
+          "type": "integer"
+        }
+      }
+    },
+    "blocked": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "External artefacts produced by the run, written by `state-machine.mjs artifact`. `diagramUrl` satisfies spec \u00a713 condition 14.",
+      "properties": {
+        "diagramUrl": {
+          "type": "string"
+        }
+      }
+    },
+    "reportRejections": {
+      "type": "object",
+      "description": "Rejected-report count per work package. Spec \u00a716.4 grants one correction per package, shared between the SubagentStop reminder and the submit validator."
+    },
+    "observedDirectorModel": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Model observed on the most recent main-thread message. Compared with the configured director tier every continuation."
+    },
+    "observedUsage": {
+      "type": "object",
+      "description": "Per-family token and cost totals measured from the session transcript, including subagents."
+    },
+    "directorMismatchReported": {
+      "type": "boolean",
+      "description": "Guard so a director-model mismatch is reported once, not every continuation."
+    },
+    "preflight": {
+      "type": "object",
+      "description": "Result of the last preflight run."
+    },
+    "gitDrift": {
+      "type": "array",
+      "description": "Repository drift detected by the PostToolUse guard (spec \u00a713 condition 11)."
+    }
+  }
+}

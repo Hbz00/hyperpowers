@@ -1,0 +1,23 @@
+{
+  "name": "hyperpowers",
+  "displayName": "Hyperpowers",
+  "description": "Bounded autonomous software development: Fable directs, Opus orchestrates, Sonnet executes, Codex contradicts, evidence decides.",
+  "version": "0.5.0",
+  "author": {
+    "name": "Corentin S."
+  },
+  "homepage": "https://github.com/Hbz00/hyperpowers",
+  "repository": "https://github.com/Hbz00/hyperpowers",
+  "license": "MIT",
+  "keywords": [
+    "autonomous",
+    "orchestration",
+    "adversarial-review",
+    "state-machine",
+    "superpowers",
+    "codex"
+  ],
+  "dependencies": [
+    "superpowers@claude-plugins-official"
+  ]
+}

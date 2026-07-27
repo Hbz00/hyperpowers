@@ -1,0 +1,33 @@
+{
+  "_comment": "Shape of evidence.json, matching schemas/evidence-matrix.schema.json. Every acceptance criterion maps to a proof someone else could re-check. 'The tests pass' is not a proof unless a named test exercises the criterion.",
+  "generatedAt": "2026-07-26T18:00:00.000Z",
+  "criteria": [
+    {
+      "id": "AC-1",
+      "statement": "A client exceeding 100 requests in any rolling 60-second window receives HTTP 429.",
+      "status": "satisfied",
+      "evidence": [
+        "tests/api/test_rate_limit.py::test_exceeds_budget_returns_429 PASSED",
+        "Failed before the change: AssertionError: assert 200 == 429 (captured 2026-07-26T17:12:03Z)"
+      ],
+      "work_packages": ["WP-001"]
+    },
+    {
+      "id": "AC-2",
+      "statement": "Limits are enforced consistently across all API processes.",
+      "status": "unverifiable",
+      "evidence": ["No multi-process test harness exists in this project; verified by inspection of the shared Redis key design only."],
+      "work_packages": ["WP-001"]
+    }
+  ],
+  "checks": [
+    { "name": "unit-tests", "command": "pytest -q", "status": "pass", "output_excerpt": "412 passed, 3 skipped in 28.11s" },
+    { "name": "lint", "command": "ruff check .", "status": "pass", "output_excerpt": "All checks passed!" },
+    { "name": "typecheck", "command": "mypy src", "status": "pass", "output_excerpt": "Success: no issues found in 142 source files" },
+    { "name": "build", "command": "", "status": "absent", "output_excerpt": "This project has no build step." }
+  ],
+  "failing_before_fix": [
+    "tests/api/test_rate_limit.py::test_exceeds_budget_returns_429 — AssertionError: assert 200 == 429"
+  ],
+  "residue": { "todos": [], "placeholders": [], "mocks": [], "out_of_scope_files": [] }
+}

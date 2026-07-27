@@ -1,0 +1,35 @@
+{
+  "_comment": "Shape of tasks.json. One entry per work package, matching schemas/work-package.schema.json. This example is a reference for the plan coordinator, not a fixture.",
+  "tasks": [
+    {
+      "id": "WP-001",
+      "objective": "Add a per-client sliding-window rate limiter to the public API middleware so that a client exceeding the configured budget receives HTTP 429.",
+      "scope": {
+        "files": ["src/api/middleware/rate_limit.py", "tests/api/test_rate_limit.py"],
+        "owned_files": ["src/api/middleware/rate_limit.py", "tests/api/test_rate_limit.py"],
+        "read_only_context": ["src/api/app.py", "src/config.py"]
+      },
+      "interfaces": "check_rate_limit(client_id: str, now: float) -> RateLimitDecision, where RateLimitDecision exposes .allowed: bool and .retry_after: float | None. Middleware returns 429 with a Retry-After header when .allowed is False.",
+      "constraints": "No new third-party dependencies. Reuse the existing Redis client from src/cache.py; do not open a second connection pool. Follow the project's existing middleware registration pattern.",
+      "verification": {
+        "method": "pytest, including a test that fails before the change",
+        "commands": ["pytest -q tests/api/test_rate_limit.py", "pytest -q tests/api"],
+        "expected": "All tests pass. test_exceeds_budget_returns_429 must fail before the implementation exists."
+      },
+      "acceptance_criteria": ["AC-1", "AC-3"],
+      "out_of_scope": [
+        "Admin UI for configuring limits",
+        "Per-endpoint budgets (AC-4 — handled by WP-003)",
+        "Metrics export"
+      ],
+      "report_format": "agent-report.schema.json",
+      "model": "sonnet",
+      "effort": "high",
+      "depends_on": [],
+      "parallel_safe": true,
+      "status": "pending",
+      "attempts": 0,
+      "reports": []
+    }
+  ]
+}

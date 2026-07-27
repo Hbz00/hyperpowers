@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evidence matrix",
+  "description": "Spec §12 phase 5 and §13 condition 1: every acceptance criterion must map to a proof. Criteria without evidence are the difference between \"tests pass\" and \"feature done\".",
+  "type": "object",
+  "required": ["criteria", "checks", "generatedAt"],
+  "properties": {
+    "generatedAt": { "type": "string" },
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "statement": { "type": "string" },
+          "status": { "type": "string", "enum": ["satisfied", "unsatisfied", "partial", "unverifiable"] },
+          "evidence": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "work_packages": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "description": "Suite-level gates: tests, lint, typecheck, build, regression.",
+      "items": {
+        "type": "object",
+        "required": ["name", "command", "status"],
+        "properties": {
+          "name": { "type": "string", "enum": ["unit-tests", "integration-tests", "e2e-tests", "lint", "typecheck", "build", "regression", "runtime", "other"] },
+          "command": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "fail", "absent", "skipped"] },
+          "output_excerpt": { "type": "string" }
+        }
+      }
+    },
+    "failing_before_fix": { "type": "array", "items": { "type": "string" }, "description": "Spec §13 condition 5: tests that demonstrably failed before the change." },
+    "residue": {
+      "type": "object",
+      "description": "Spec §12 phase 5: unintended leftovers.",
+      "properties": {
+        "todos": { "type": "array", "items": { "type": "string" } },
+        "placeholders": { "type": "array", "items": { "type": "string" } },
+        "mocks": { "type": "array", "items": { "type": "string" } },
+        "out_of_scope_files": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

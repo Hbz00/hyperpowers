@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex adversarial review output",
+  "description": "Strict shape passed to `codex exec --output-schema`. Kept flat and closed because OpenAI structured outputs require every property to be required and additionalProperties false.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "findings", "residual_risks", "coverage_notes"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["blocker", "concerns", "clean"],
+      "description": "blocker = at least one blocking defect; concerns = non-blocking defects only; clean = nothing material found."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Two to four sentences. What was reviewed, the single most important conclusion, and whether the artefact can proceed."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Ordered most severe first. Empty when the verdict is clean.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "category", "location", "claim", "evidence", "recommendation", "blocking", "confidence"],
+        "properties": {
+          "id": { "type": "string", "description": "Stable identifier, e.g. DESIGN-001. Reused verbatim in later rounds so a finding can be tracked." },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+          "category": {
+            "type": "string",
+            "enum": ["architecture", "correctness", "security", "concurrency", "data-integrity", "performance", "complexity", "testability", "scope", "maintainability", "assumption", "failure-mode"]
+          },
+          "location": { "type": "string", "description": "File path, section heading, task id, or component name. Never a whole-document reference." },
+          "claim": { "type": "string", "description": "The defect itself, stated as a falsifiable assertion." },
+          "evidence": { "type": "array", "items": { "type": "string" }, "description": "Concrete anchors: quoted lines, paths, identifiers. No raw logs." },
+          "recommendation": { "type": "string", "description": "The smallest correction that resolves the claim." },
+          "blocking": { "type": "boolean", "description": "True only if shipping with this defect would be wrong, not merely suboptimal." },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "residual_risks": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Risks that are real but deliberately not raised as findings."
+    },
+    "coverage_notes": {
+      "type": "string",
+      "description": "What was NOT reviewed and why — missing context, truncated pack, unreadable file. Empty string if coverage was complete."
+    }
+  }
+}

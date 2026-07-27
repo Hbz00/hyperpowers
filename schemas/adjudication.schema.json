@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Opus adjudication of a Codex finding",
+  "description": "Spec §9. Codex is never the final authority; every finding gets an explicit, recorded decision.",
+  "type": "object",
+  "required": ["finding_id", "decision", "rationale", "correction_owner", "escalate_to_fable"],
+  "properties": {
+    "finding_id": { "type": "string" },
+    "decision": {
+      "type": "string",
+      "enum": ["accepted", "rejected", "needs_evidence", "duplicate", "out_of_scope", "deferred_non_blocking", "escalated_to_fable"]
+    },
+    "rationale": { "type": "string", "minLength": 20, "description": "Why. A decision without a reason is not adjudication." },
+    "correction_owner": { "type": "string", "enum": ["opus", "sonnet", "fable", "none"] },
+    "required_change": { "type": ["string", "null"], "description": "Required when decision is accepted." },
+    "verification": { "type": ["string", "null"], "description": "How the correction will be proven. Required when decision is accepted." },
+    "duplicate_of": { "type": ["string", "null"] },
+    "escalate_to_fable": { "type": "boolean" },
+    "resolved": { "type": "boolean", "default": false },
+    "resolved_evidence": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "decision": { "const": "accepted" } }, "required": ["decision"] },
+      "then": { "required": ["required_change", "verification"], "properties": { "required_change": { "type": "string", "minLength": 10 }, "verification": { "type": "string", "minLength": 10 } } }
+    },
+    {
+      "if": { "properties": { "decision": { "const": "duplicate" } }, "required": ["decision"] },
+      "then": { "required": ["duplicate_of"], "properties": { "duplicate_of": { "type": "string", "minLength": 1 } } }
+    }
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent report",
+  "description": "Spec \u00a716.4. An agent may not finish with \"Done.\" \u2014 it must return evidence. This shape is enforced by scripts/validate-agent-report.mjs, not by prompt discipline.",
+  "type": "object",
+  "required": [
+    "work_package_id",
+    "agent",
+    "status",
+    "files_read",
+    "files_modified",
+    "commands_run",
+    "results",
+    "unverified",
+    "risks",
+    "evidence",
+    "recommendation"
+  ],
+  "properties": {
+    "work_package_id": {
+      "type": "string"
+    },
+    "agent": {
+      "type": "string",
+      "description": "Agent type that produced this report."
+    },
+    "model": {
+      "type": "string"
+    },
+    "effort": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "partial",
+        "failed",
+        "blocked"
+      ]
+    },
+    "files_read": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "files_modified": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "commands_run": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Expected versus observed, per verification step. This is the substance of the report.",
+      "items": {
+        "type": "object",
+        "required": [
+          "check",
+          "expected",
+          "observed",
+          "passed"
+        ],
+        "properties": {
+          "check": {
+            "type": "string"
+          },
+          "expected": {
+            "type": "string"
+          },
+          "observed": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "unverified": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "What the agent did NOT verify. An empty array is a claim of complete verification."
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "description": "Paths, command output excerpts or identifiers a reviewer can re-check."
+    },
+    "recommendation": {
+      "type": "string",
+      "minLength": 10,
+      "description": "What the coordinator should do next, and why. Not a restatement of the status."
+    },
+    "out_of_scope_changes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  }
+}

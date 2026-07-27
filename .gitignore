@@ -1,0 +1,16 @@
+# Installed dependencies. The plugin itself has none — every script runs on the Node the user
+# already has, because a plugin that needs `npm install` to enforce its safety invariants does not
+# enforce them on first run. This entry exists so that an incidental `npm install` cannot commit a
+# tree of packages the plugin does not use.
+node_modules/
+
+# Nothing else belongs here. In particular:
+#
+#   docs/ is tracked on purpose. `validation-ledger.md` is the project's primary evidence — every
+#   load-bearing claim with its verification method and verdict, including the ones that turned out
+#   to be wrong — and `cost-model.md` now carries the only measurements anyone has taken. A README
+#   that says "nothing here is assumed" and a repository that does not carry the proof would be a
+#   worse combination than having no ledger at all.
+#
+#   Run data never appears here either, so it needs no rule: it lives under $CLAUDE_PLUGIN_DATA
+#   (spec §20), which is what keeps the reviewer looking at your diff instead of our logs.

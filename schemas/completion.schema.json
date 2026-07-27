@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Completion verification result",
+  "description": "Mechanical evaluation of the fourteen conditions in spec §13. `complete` is true only when every applicable condition passes.",
+  "type": "object",
+  "required": ["gate", "complete", "conditions", "evaluatedAt"],
+  "properties": {
+    "gate": { "type": "string", "enum": ["design", "plan", "completion"] },
+    "complete": { "type": "boolean" },
+    "evaluatedAt": { "type": "string" },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "status"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "fail", "not_applicable", "unverifiable"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "openBlockers": { "type": "array", "items": { "type": "string" } },
+    "residualRisks": { "type": "array", "items": { "type": "string" } }
+  }
+}

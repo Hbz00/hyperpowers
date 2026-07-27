@@ -1,0 +1,76 @@
+{
+  "_comment": "Reference shape of a run's state.json. Created by `state-machine.mjs init` and mutated only through that CLI \u2014 agents never edit it directly, because a state machine an agent can rewrite is not a state machine. Authoritative schema: schemas/state.schema.json.",
+  "schemaVersion": 1,
+  "runId": "20260726T180000Z-a1b2c3",
+  "sessionId": "e6f2\u2026",
+  "projectRoot": "/path/to/project",
+  "createdAt": "2026-07-26T18:00:00.000Z",
+  "updatedAt": "2026-07-26T18:42:11.000Z",
+  "phase": "EXECUTION",
+  "revision": 47,
+  "request": {
+    "description": "Add per-client rate limiting to the public API."
+  },
+  "config": {
+    "budgets": {},
+    "effort": {},
+    "models": {}
+  },
+  "observedEffort": "high",
+  "observedDirectorModel": "claude-fable-5",
+  "history": [
+    {
+      "from": "DESIGN_REVIEW_2",
+      "to": "DESIGN_LOCK",
+      "at": "2026-07-26T18:22:04.000Z",
+      "actor": "codex",
+      "artifact": "reviews/design-2.json",
+      "evidence": "verdict=concerns, 2 findings, 0 blocking",
+      "cost": null,
+      "fallbacks": [],
+      "openProblems": [],
+      "note": null
+    }
+  ],
+  "counters": {
+    "workPackages": 6,
+    "agentsLaunched": 11,
+    "fallbacks": 0,
+    "codexInvocations": 4,
+    "retries": {},
+    "extraReviews": {}
+  },
+  "reviews": {
+    "design-1": {
+      "verdict": "blocker",
+      "findings": 5,
+      "blocking": 4
+    }
+  },
+  "adjudications": {
+    "design-1": {
+      "at": "\u2026",
+      "decisions": []
+    }
+  },
+  "gates": {
+    "design": {
+      "passed": true,
+      "at": "\u2026",
+      "reason": null
+    }
+  },
+  "openBlockers": [],
+  "residualRisks": [],
+  "stall": {
+    "signature": null,
+    "count": 0,
+    "lastAt": null
+  },
+  "turn": {
+    "promptId": "prompt-1",
+    "blocks": 23
+  },
+  "blocked": null,
+  "artifacts": {}
+}

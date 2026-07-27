@@ -1,0 +1,31 @@
+{
+  "name": "hyperpowers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code plugin: bounded autonomous software development with adversarial review gates",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test 'tests/**/*.test.mjs'",
+    "test:policy": "node --test tests/git-policy.test.mjs",
+    "docs": "node scripts/docs-gen.mjs",
+    "docs:check": "node scripts/docs-gen.mjs --check",
+    "check": "npm run docs:check && npm test",
+    "bench": "node tests/bench/review-latency.mjs"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hbz00/hyperpowers.git"
+  },
+  "homepage": "https://github.com/Hbz00/hyperpowers#readme",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "autonomous-agents",
+    "adversarial-review",
+    "orchestration"
+  ]
+}

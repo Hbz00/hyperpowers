@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sonnet work package (delegation contract)",
+  "description": "Spec §3.2. A Sonnet must never receive \"implement this part of the plan\"; it receives a self-contained, verifiable contract that an agent with no prior context can execute.",
+  "type": "object",
+  "required": ["id", "objective", "scope", "interfaces", "constraints", "verification", "acceptance_criteria", "out_of_scope", "report_format", "status"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^WP-[0-9]{3,}$" },
+    "objective": { "type": "string", "minLength": 20, "description": "1. What this package must achieve, in one paragraph." },
+    "scope": {
+      "type": "object",
+      "required": ["files", "owned_files"],
+      "description": "2. Perimeter. `owned_files` is the exclusive write lock for spec §15 concurrency control.",
+      "properties": {
+        "files": { "type": "array", "items": { "type": "string" } },
+        "owned_files": { "type": "array", "items": { "type": "string" } },
+        "read_only_context": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "interfaces": { "type": "string", "description": "3. Signatures, behaviours and contracts the result must satisfy." },
+    "constraints": { "type": "string", "description": "4. Rules and prohibitions, including project conventions." },
+    "verification": {
+      "type": "object",
+      "required": ["method", "commands"],
+      "description": "5. How the work proves itself.",
+      "properties": {
+        "method": { "type": "string" },
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "expected": { "type": "string" }
+      }
+    },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "6. Ids of the design criteria this package satisfies." },
+    "out_of_scope": { "type": "array", "items": { "type": "string" }, "description": "7. Explicitly excluded work, to prevent scope drift." },
+    "report_format": { "type": "string", "description": "8. Required shape of the returned report (agent-report.schema.json)." },
+    "model": { "type": "string", "enum": ["sonnet", "opus", "fable"], "default": "sonnet" },
+    "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "default": "high" },
+    "depends_on": { "type": "array", "items": { "type": "string" } },
+    "parallel_safe": { "type": "boolean", "default": false, "description": "True only when owned_files is disjoint from every concurrent package (spec §15)." },
+    "status": { "type": "string", "enum": ["pending", "in_progress", "reported", "accepted", "remediating", "failed"] },
+    "attempts": { "type": "integer", "minimum": 0, "default": 0 },
+    "reports": { "type": "array", "items": { "type": "string" } }
+  }
+}

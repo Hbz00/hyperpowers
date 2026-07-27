@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Normalised Codex finding",
+  "description": "Internal form of a finding after the adapter has stamped it with round and artefact provenance. Spec §9.",
+  "type": "object",
+  "required": ["id", "severity", "category", "artifact", "round", "location", "claim", "evidence", "recommendation", "blocking", "confidence"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[A-Z]+-[0-9]{3,}$" },
+    "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+    "category": { "type": "string" },
+    "artifact": { "type": "string", "enum": ["design", "plan", "implementation"] },
+    "round": { "type": "string", "enum": ["design-1", "design-2", "plan-1", "plan-2", "implementation-1", "implementation-2", "extra"] },
+    "location": { "type": "string" },
+    "claim": { "type": "string" },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "recommendation": { "type": "string" },
+    "blocking": { "type": "boolean" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}
