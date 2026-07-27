@@ -18,6 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { dataRoot, isDataRootFromHarness, describeDataRoot, dataRootAgreesWithHooks, dataRootIsAmbiguous, artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { REQUIRED_ENV, RECOMMENDED_ENV, loadConfig } from './lib/config.mjs';
+import { directorTier } from './lib/transcript.mjs';
 import { tryLoadState, mutateState } from './lib/state.mjs';
 import { logEvent } from './lib/telemetry.mjs';
 
@@ -234,12 +235,31 @@ const add = (id, status, detail, remedy = null) => checks.push({ id, status, det
 // tick: the run is genuinely exposed here, and the mitigation is named rather than assumed.
 {
   const configured = Object.values(config.models ?? {});
-  add('claude-models', 'unverifiable',
-    `Availability of ${configured.join(', ')} cannot be checked before use; the harness offers no ` +
-      `capability query. The Stop controller reads the transcript on every continuation and raises ` +
-      `\`model_mismatch\` if the director tier is not the configured model, so a silent demotion ` +
-      `is detected within one turn and fails completion condition 12b.`,
-    'If a run reports model_mismatch, stop and check the account\'s model access rather than continuing.');
+  // Availability still cannot be queried ahead of use — but by the time preflight runs, the
+  // director has already produced messages, so the tier that is *actually* directing can be read
+  // from the transcript. That turns the most consequential of these checks from a disclaimer into
+  // a measurement, at the one moment acting on it is still cheap.
+  const tier = runId ? directorTier(tryLoadState(projectRoot, runId) ?? {}) : { ok: null };
+  if (tier.ok === true) {
+    add('claude-models', 'pass',
+      `The director is running on \`${tier.observed}\`, which is the configured ${tier.expected} tier. ` +
+        `Availability of the coordinator and worker tiers is still unverifiable before use; a demotion ` +
+        `there surfaces as \`model_mismatch\` and fails completion condition 12b.`);
+  } else if (tier.ok === false) {
+    add('claude-models', 'fail',
+      `The director is running on \`${tier.observed}\` (${tier.family}), not the configured ` +
+        `${tier.expected} tier. Product authority would be exercised by the wrong model for the whole run.`,
+      `A skill's \`model:\` pin does not override a session model chosen interactively — measured. ` +
+        `Open the session on the director tier (\`claude --model ${tier.expected}\`) and invoke ` +
+        `/hyperpowers:feature there, or declare the change deliberately with ` +
+        `{"models":{"director":"${tier.family}"}} in .hyperpowers.json.`);
+  } else {
+    add('claude-models', 'unverifiable',
+      `Availability of ${configured.join(', ')} cannot be checked before use, and no director message ` +
+        `has been written yet to read the tier from. The first transition out of PREFLIGHT refuses a ` +
+        `mismatch, and the Stop controller raises \`model_mismatch\` thereafter.`,
+      'Run this again with --run <id> once the run exists, or rely on the transition check.');
+  }
 }
 
 // ---------------------------------------------------------------------- git ----

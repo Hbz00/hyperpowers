@@ -271,7 +271,13 @@ function shareTable(byFamily, totals) {
 export function transcriptPathFor(state) {
   if (!state?.sessionId || !state?.projectRoot) return null;
   const slug = String(state.projectRoot).replace(/[/.]/g, '-');
-  const p = path.join(os.homedir(), '.claude', 'projects', slug, `${state.sessionId}.jsonl`);
+  // `HYPERPOWERS_TRANSCRIPT_ROOT` mirrors `HYPERPOWERS_DATA_ROOT`: the one override trusted
+  // unconditionally, so a test can place a transcript where the code will look for it without
+  // writing into the user's real `~/.claude/projects`.
+  const root = process.env.HYPERPOWERS_TRANSCRIPT_ROOT
+    ? path.resolve(process.env.HYPERPOWERS_TRANSCRIPT_ROOT)
+    : path.join(os.homedir(), '.claude', 'projects');
+  const p = path.join(root, slug, `${state.sessionId}.jsonl`);
   try {
     fs.statSync(p);
     return p;
@@ -304,6 +310,33 @@ export function measuredUsageFor(state, { cacheDir = null } = {}) {
  */
 export function measuredCostFor(state) {
   return measuredUsageFor(state)?.totals.costUsd ?? null;
+}
+
+/**
+ * Which model is actually directing this run, against the tier it was configured for.
+ *
+ * The architecture's central premise is that product authority sits with the strongest tier. A
+ * skill declares `model: fable` to secure that — and the pin does **not** always take. Measured on
+ * this machine, same account, same plugin build, same `/hyperpowers:feature` invocation:
+ *
+ *   `claude -p "/pintest"`            skill pinning fable → **claude-fable-5**   the pin wins
+ *   interactive session opened on Opus → **claude-opus-5**    the session model wins
+ *
+ * Two real runs on a 200k-line project directed themselves with Opus before anyone noticed, one of
+ * them for $4.19. Nothing was broken — every gate, every dispatch, every hook behaved — the run was
+ * simply not the system it claimed to be.
+ *
+ * `ok: null` means the question could not be asked yet: no transcript, or no assistant message in
+ * it. That is not the same as agreement and callers must not treat it as one.
+ */
+export function directorTier(state) {
+  const expected = state?.config?.models?.director ?? 'fable';
+  const transcript = transcriptPathFor(state);
+  if (!transcript) return { expected, observed: null, family: null, ok: null };
+  const observed = currentMainThreadModel(transcript);
+  if (!observed) return { expected, observed: null, family: null, ok: null };
+  const family = familyOf(observed);
+  return { expected, observed, family, ok: family === expected };
 }
 
 /**

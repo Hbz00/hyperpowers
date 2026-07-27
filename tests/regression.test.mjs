@@ -1437,3 +1437,87 @@ describe('§Q6 — a gate that tolerates an unverifiable condition still has to 
       /Not verifiable by the \$\{name\} gate/);
   });
 });
+
+/**
+ * §Q8 — a run may not leave PREFLIGHT directed by the wrong tier.
+ *
+ * A skill's `model:` pin does not always take. Measured on one machine, one account, one plugin
+ * build, one `/hyperpowers:feature` invocation:
+ *
+ *   `claude -p "/pintest"` with a skill pinning fable  → claude-fable-5   (the pin wins)
+ *   an interactive session opened on Opus              → claude-opus-5    (the session wins)
+ *
+ * Two real runs on a 200k-line project therefore directed themselves with Opus. Nothing broke —
+ * every gate, dispatch and hook behaved — the run simply was not the system it claimed to be, and
+ * the existing detection (Stop hook → `model_mismatch` → condition 12b) only speaks when the
+ * director first tries to end its turn, which a healthy run does once in 86 minutes. The first of
+ * those runs cost $4.19 before anyone looked.
+ */
+describe('§Q8 — the director tier is checked before the run starts, not after it ends', () => {
+  let QT;
+  const mkTranscript = (root, projectRoot, sessionId, model) => {
+    const dir = path.join(root, String(projectRoot).replace(/[/.]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), `${JSON.stringify({
+      type: 'assistant', requestId: 'r1',
+      message: { model, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    })}\n`);
+  };
+
+  const withRun = async (model, fn) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-tier-'));
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const saved = { data: process.env.HYPERPOWERS_DATA_ROOT, tx: process.env.HYPERPOWERS_TRANSCRIPT_ROOT };
+    process.env.HYPERPOWERS_DATA_ROOT = path.join(tmp, 'data');
+    process.env.HYPERPOWERS_TRANSCRIPT_ROOT = path.join(tmp, 'transcripts');
+    try {
+      const { newState, saveState, transition } = await import('../scripts/lib/state.mjs');
+      const s = newState({ runId: 'R1', sessionId: 'S1', projectRoot: proj, description: 'tier probe', config: { models: { director: 'fable' } } });
+      saveState(proj, 'R1', s);
+      fs.writeFileSync(path.join(path.dirname(path.join(process.env.HYPERPOWERS_DATA_ROOT, 'x')), '.keep'), '');
+      if (model) mkTranscript(process.env.HYPERPOWERS_TRANSCRIPT_ROOT, proj, 'S1', model);
+      await fn({ proj, transition });
+    } finally {
+      for (const [k, v] of [['HYPERPOWERS_DATA_ROOT', saved.data], ['HYPERPOWERS_TRANSCRIPT_ROOT', saved.tx]]) {
+        if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  };
+
+  test('a demoted director stops the run at its first transition', async () => {
+    await withRun('claude-opus-5', ({ proj, transition }) => {
+      assert.throws(() => transition(proj, 'R1', 'INTAKE', { actor: 'fable' }),
+        /director is running on `claude-opus-5`.*configured for the `fable` tier/s);
+    });
+  });
+
+  test('the refusal names both ways out', async () => {
+    await withRun('claude-opus-5', ({ proj, transition }) => {
+      try { transition(proj, 'R1', 'INTAKE', { actor: 'fable' }); assert.fail('should have refused'); }
+      catch (err) {
+        assert.match(err.message, /claude --model fable/, 'it must say how to run it on the right tier');
+        assert.match(err.message, /"models":\{"director":"opus"\}/, 'and how to make the change deliberate');
+      }
+    });
+  });
+
+  test('the correct tier passes, and BLOCKED stays reachable when it does not', async () => {
+    await withRun('claude-fable-5', ({ proj, transition }) => {
+      assert.equal(transition(proj, 'R1', 'INTAKE', { actor: 'fable' }).phase, 'INTAKE');
+    });
+    await withRun('claude-opus-5', ({ proj, transition }) => {
+      // A run that cannot start must still be able to say so.
+      assert.equal(transition(proj, 'R1', 'BLOCKED', { actor: 'system', reason: 'wrong tier' }).phase, 'BLOCKED');
+    });
+  });
+
+  test('an unobservable tier is not treated as agreement, and does not wedge the run', async () => {
+    await withRun(null, ({ proj, transition }) => {
+      // No transcript yet: the question could not be asked. The run proceeds and the Stop hook
+      // and preflight remain as the later checks.
+      assert.equal(transition(proj, 'R1', 'INTAKE', { actor: 'fable' }).phase, 'INTAKE');
+    });
+  });
+});

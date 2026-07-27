@@ -1717,6 +1717,45 @@ place it is genuinely invoked: the **director** calls `superpowers:brainstorming
 
 ---
 
+### Q8. A skill's `model:` pin does not survive an interactive session model — **and it cost real money to learn**
+
+The architecture rests on Fable holding product authority. `skills/feature/SKILL.md` declares
+`model: fable` to secure it, and ADR-0001 explains why the whole run must stay in one turn: the pin
+is turn-scoped. Neither document establishes that the pin **takes** in the first place.
+
+Measured, one machine, one account, one plugin build, one `/hyperpowers:feature` invocation:
+
+| how the session was opened | director observed |
+| --- | --- |
+| `claude -p "…"` — headless, three pilot runs | `claude-fable-5` ✔ |
+| `claude -p "/pintest"` — throwaway skill pinning fable, probed today | `claude-fable-5` ✔ |
+| interactive session opened on Opus, twice | **`claude-opus-5`** ✘ |
+
+The user's `~/.claude/settings.json` carries `"model": "opus[1m]"`, and the headless probe still
+resolved Fable — so a persisted preference is not the cause. **An interactively selected session
+model outranks a skill's declared model; a headless one does not.** Subagent pins are unaffected:
+in both failed runs the researchers ran `claude-sonnet-5` correctly while the director did not.
+
+Nothing broke. Every gate, dispatch and hook behaved. The run was simply not the system it claimed
+to be, and the existing detection said so only when the director first tried to end its turn —
+which a healthy run does once in 86 minutes (§O14). The first of the two runs reached $4.19 and 180
+messages of real research before anyone looked at the model field.
+
+Fixed at the two moments it is still cheap:
+
+- **`transition()` refuses to leave `PREFLIGHT`** on a confirmed mismatch, naming both ways out —
+  open the session on the tier, or declare the change with `{"models":{"director":"opus"}}`.
+  Terminal targets stay exempt, so a run that cannot start can still reach `BLOCKED`.
+- **Preflight's `claude-models` check stops being a disclaimer.** Availability still cannot be
+  queried ahead of use, but by the time preflight runs the director has already written messages,
+  so the tier that is actually directing is readable. `unverifiable` now means only "no message yet".
+
+One shared reader, `directorTier()`, answers for both — and returns `ok: null` rather than `true`
+when the question could not be asked, because "unobservable" and "agreed" are the distinction this
+whole class of defect keeps blurring.
+
+---
+
 ## I. Accepted without independent verification
 
 | Claim | Spec ref | Why accepted / mitigation |

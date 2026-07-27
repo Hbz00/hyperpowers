@@ -14,6 +14,7 @@ import { readJson, writeJson, withLock, nowIso, sha256, ensureDir } from './io.m
 import { artifacts, runDir, PLUGIN_ROOT } from './paths.mjs';
 import { validate } from './validate.mjs';
 import { PHASES, canTransition, isKnownPhase, isTerminal } from './phases.mjs';
+import { directorTier } from './transcript.mjs';
 import { logEvent } from './telemetry.mjs';
 
 export const STATE_SCHEMA_VERSION = 1;
@@ -256,6 +257,34 @@ export function transition(projectRoot, runId, to, meta = {}) {
     // mechanical content of spec §13. Exempting it made all fourteen conditions advisory at the
     // one moment they decide anything — a run could declare success with nothing proven. Success
     // is the one terminal state that must be earned.
+    // The director tier, checked once, at the only moment it is still cheap to act on.
+    //
+    // The Stop controller already raises `model_mismatch`, and completion condition 12b already
+    // fails on it — but the Stop hook fires when the director tries to *end* its turn, which a
+    // healthy run does once in 86 minutes (§O14). Both real runs on a live project discovered the
+    // demotion after the fact; the first had spent $4.19. Preflight reports it too, but preflight
+    // is an instruction the skill gives, not something the machine requires — and today has been a
+    // long lesson in the difference. Leaving PREFLIGHT is the machine's first opportunity.
+    //
+    // Terminal targets are exempt: a run that cannot start must still be able to reach BLOCKED.
+    if (from === 'PREFLIGHT' && !isTerminal(to)) {
+      const tier = directorTier(state);
+      if (tier.ok === false) {
+        throw new Error(
+          `The director is running on \`${tier.observed}\` (${tier.family}), but this run is ` +
+            `configured for the \`${tier.expected}\` tier. Product authority — the design gate, the ` +
+            `final acceptance, every irreversible trade-off — would be exercised by the wrong model, ` +
+            `and completion condition 12b would fail at the end of the run rather than now.\n\n` +
+            `A skill's \`model:\` pin does not override a session model chosen interactively. Open ` +
+            `the session on the director tier instead:\n` +
+            `  claude --model ${tier.expected}\n` +
+            `then invoke /hyperpowers:feature.\n\n` +
+            `If you mean to direct with ${tier.family}, say so and this stops being a mismatch: ` +
+            `put {"models":{"director":"${tier.family}"}} in .hyperpowers.json and start a new run.`,
+        );
+      }
+    }
+
     const skipGate = meta.force === true || to === 'SUSPENDED' || (isTerminal(to) && to !== 'COMPLETE');
     if (!skipGate) {
       const gate = checkGate(projectRoot, runId, state, from);
