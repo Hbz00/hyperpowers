@@ -68,7 +68,32 @@ function ownsDataDir(dir) {
  * the one in use. `-fallback` is excluded: it is what we resolve to when nothing else is found,
  * so letting it win here would make the degraded path sticky.
  */
-function siblingDataDir(parent) {
+/** This plugin installation's stable identity, used to tell our data directory from another's. */
+function pluginIdentity() {
+  try { return fs.realpathSync(PLUGIN_ROOT); } catch { return PLUGIN_ROOT; }
+}
+
+/** The `pluginRoot` a directory's SessionStart marker claims, or `null` when it makes no claim. */
+function markedPluginRoot(dir) {
+  try {
+    const marker = JSON.parse(fs.readFileSync(path.join(dir, '.data-root.json'), 'utf8'));
+    return typeof marker?.pluginRoot === 'string' ? marker.pluginRoot : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every `hyperpowers-*` data directory beside some other plugin's, most recently touched first.
+ *
+ * Recency is a tiebreak, never an identity. A machine carrying both a marketplace install and a
+ * `--plugin-dir` development copy has `hyperpowers-hyperpowers` *and* `hyperpowers-inline`, and
+ * choosing by mtime picked whichever was touched last — reproduced here, where an empty directory
+ * created minutes earlier by a `plugin install` outranked the one holding every run, and
+ * `describeDataRoot()` reported it as trusted. §O1's failure through a second door: the CLI writes
+ * into one directory while the hooks read the other, and the run still looks healthy.
+ */
+function siblingCandidates(parent) {
   let entries;
   try {
     entries = fs.readdirSync(parent, { withFileTypes: true })
@@ -81,9 +106,31 @@ function siblingDataDir(parent) {
       })
       .sort((a, b) => b.mtime - a.mtime);
   } catch {
-    return null;
+    return [];
   }
-  return entries[0]?.full ?? null;
+  return entries.map((e) => e.full);
+}
+
+/**
+ * Our data directory beside `parent`, and whether the answer was actually knowable.
+ *
+ * `matched` is true only when a directory's marker names this plugin installation. With one
+ * candidate the answer is unambiguous without a marker. With several and no match, a directory is
+ * still returned so nothing crashes — but `ambiguous` says the choice was a guess, and preflight
+ * refuses to start a run on a guess.
+ */
+function resolveSibling(parent) {
+  const candidates = siblingCandidates(parent);
+  if (candidates.length === 0) return { dir: null, ambiguous: false, matched: false, candidates };
+  const me = pluginIdentity();
+  const mine = candidates.find((dir) => markedPluginRoot(dir) === me);
+  if (mine) return { dir: mine, ambiguous: false, matched: true, candidates };
+  if (candidates.length === 1) return { dir: candidates[0], ambiguous: false, matched: false, candidates };
+  return { dir: candidates[0], ambiguous: true, matched: false, candidates };
+}
+
+function siblingDataDir(parent) {
+  return resolveSibling(parent).dir;
 }
 
 /**
@@ -125,6 +172,21 @@ export function dataRoot() {
   return siblingDataDir(home) ?? path.join(home, `${PLUGIN_NAME}-fallback`);
 }
 
+/**
+ * More than one installation's data directory is present and none of them claims to be ours.
+ *
+ * Returned separately from `dataRoot()` because that function has no way to fail: it is called
+ * from hooks that must not crash. Preflight is where a guess becomes a refusal.
+ */
+export function dataRootIsAmbiguous() {
+  if (process.env.HYPERPOWERS_DATA_ROOT) return null;
+  const declared = process.env.CLAUDE_PLUGIN_DATA ? path.resolve(process.env.CLAUDE_PLUGIN_DATA) : null;
+  if (declared && ownsDataDir(declared)) return null;
+  const parent = declared ? path.dirname(declared) : path.join(os.homedir(), '.claude', 'plugins', 'data');
+  const sibling = resolveSibling(parent);
+  return sibling.ambiguous ? sibling.candidates : null;
+}
+
 /** How the root above was arrived at, so `preflight` and `status` can show it rather than assume it. */
 export function describeDataRoot() {
   const resolved = dataRoot();
@@ -132,6 +194,17 @@ export function describeDataRoot() {
   const declared = process.env.CLAUDE_PLUGIN_DATA ? path.resolve(process.env.CLAUDE_PLUGIN_DATA) : null;
   if (declared && ownsDataDir(declared)) return { resolved, source: 'CLAUDE_PLUGIN_DATA', trusted: true };
   if (declared) {
+    const sibling = resolveSibling(path.dirname(declared));
+    if (sibling.ambiguous) {
+      return {
+        resolved,
+        source: 'resolved beside a foreign CLAUDE_PLUGIN_DATA',
+        trusted: false,
+        ambiguous: true,
+        candidates: sibling.candidates,
+        foreign: declared,
+      };
+    }
     return {
       resolved,
       source: 'resolved beside a foreign CLAUDE_PLUGIN_DATA',
@@ -157,9 +230,25 @@ export function isDataRootFromHarness() {
  */
 export function markDataRootAuthoritative() {
   try {
+    // Never stamp a guess. `dataRoot()` always answers, because hooks cannot crash — but on a
+    // machine carrying two installations the answer may be the newest directory rather than ours,
+    // and stamping it would turn a coin flip into a permanent identity claim. Observed while
+    // testing this very fix: a bare CLI invocation stamped the empty marketplace directory, after
+    // which the ambiguity check reported everything in order. In the real path SessionStart runs
+    // as a hook, where `CLAUDE_PLUGIN_DATA` names this plugin's own directory, so the stamp is
+    // certain by construction; anywhere else, staying silent leaves preflight free to refuse.
+    if (!describeDataRoot().trusted) return;
     const root = dataRoot();
     ensureDir(root);
-    writeJson(path.join(root, '.data-root.json'), { resolved: root, stampedAt: new Date().toISOString() });
+    // `resolved` alone is self-referential: it only says a directory resolved to itself, which is
+    // true of every directory that ever stamped one. `pluginRoot` is what makes the marker an
+    // identity claim, so two installations on one machine can be told apart.
+    writeJson(path.join(root, '.data-root.json'), {
+      resolved: root,
+      pluginRoot: pluginIdentity(),
+      pluginVersion: readJson(path.join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), {})?.version ?? null,
+      stampedAt: new Date().toISOString(),
+    });
   } catch {
     /* best effort: a marker we could not write must never stop a session from starting */
   }
@@ -168,7 +257,12 @@ export function markDataRootAuthoritative() {
 export function dataRootAgreesWithHooks() {
   const { resolved } = describeDataRoot();
   try {
-    return readJson(path.join(resolved, '.data-root.json'), null)?.resolved === resolved;
+    const marker = readJson(path.join(resolved, '.data-root.json'), null);
+    if (marker?.resolved !== resolved) return false;
+    // A marker without `pluginRoot` predates identity stamping. It cannot distinguish this
+    // installation from another one on the same machine, so it does not count as agreement —
+    // the next SessionStart re-stamps it and the run proceeds.
+    return marker.pluginRoot === pluginIdentity();
   } catch {
     return false;
   }

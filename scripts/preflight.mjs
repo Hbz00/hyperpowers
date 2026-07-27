@@ -16,8 +16,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { parseArgs, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
-import { dataRoot, isDataRootFromHarness, describeDataRoot, dataRootAgreesWithHooks, artifacts } from './lib/paths.mjs';
-import { REQUIRED_ENV, loadConfig } from './lib/config.mjs';
+import { dataRoot, isDataRootFromHarness, describeDataRoot, dataRootAgreesWithHooks, dataRootIsAmbiguous, artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
+import { REQUIRED_ENV, RECOMMENDED_ENV, loadConfig } from './lib/config.mjs';
 import { tryLoadState, mutateState } from './lib/state.mjs';
 import { logEvent } from './lib/telemetry.mjs';
 
@@ -51,7 +51,8 @@ const add = (id, status, detail, remedy = null) => checks.push({ id, status, det
 
 // ------------------------------------------------------ environment contract ----
 // `plugin.json` cannot contribute `env` (ledger G4), so this must come from the project's
-// .claude/settings.json and requires a session restart to take effect.
+// .claude/settings.json. Whether that needs a session restart is measured here rather than
+// assumed: this process was spawned after setup wrote the file, so unlike setup it can tell.
 {
   const missing = [];
   for (const [name, spec] of Object.entries(REQUIRED_ENV)) {
@@ -63,9 +64,19 @@ const add = (id, status, detail, remedy = null) => checks.push({ id, status, det
     }
     if (actual !== spec.value) missing.push(`${name} (want ${spec.value}, got ${actual ?? 'unset'})`);
   }
+  // Recommended, not required: reported so the user knows, never a reason to refuse a run.
+  const advisory = Object.entries(RECOMMENDED_ENV)
+    .filter(([name, spec]) => process.env[name] !== spec.value)
+    .map(([name, spec]) => `${name} (${spec.why})`);
+  if (advisory.length) {
+    add('environment-recommended', 'warn',
+      `Not set: ${advisory.join('; ')}`,
+      'Optional. Escalation still works; a second advisor simply arbitrates outside this run\'s ledger.');
+  }
+
   add('environment-contract', missing.length === 0 ? 'pass' : 'fail',
     missing.length === 0 ? 'All required environment variables are in force.' : `Unset or wrong: ${missing.join('; ')}`,
-    missing.length ? 'Run /hyperpowers:setup, then restart the Claude Code session — environment variables are read at startup.' : null);
+    missing.length ? 'Run /hyperpowers:setup. If these are still missing when you re-run preflight, restart the Claude Code session — environment variables may only be read at startup.' : null);
 }
 {
   const where = describeDataRoot();
@@ -97,6 +108,19 @@ const add = (id, status, detail, remedy = null) => checks.push({ id, status, det
   // first version of this check was a `warn` in both cases, which is the wrong reaction to the
   // most severe defect the run has ever had: a warning is something a user skims past.
   const inSession = Boolean(process.env.CLAUDE_CODE_SESSION_ID);
+  // Two installations, neither claiming this one: the resolver has to answer, so it returns the
+  // most recently touched directory — a coin flip that decides whether the hooks and these scripts
+  // govern the same run. Refusing here is the only place the guess can be turned into a stop.
+  const rival = dataRootIsAmbiguous();
+  if (rival) {
+    add('plugin-data-identity', 'fail',
+      `More than one Hyperpowers data directory exists and none of them is marked as belonging to ` +
+        `this installation (${PLUGIN_ROOT}): ${rival.join(', ')}. The directory in use was chosen by ` +
+        `recency, not identity.`,
+      'Restart the session so SessionStart stamps the right one, or remove the installation you are ' +
+        'not using (`claude plugin uninstall hyperpowers`, or delete the stale data directory).');
+  }
+
   add('plugin-data-agreement', agreed ? 'pass' : inSession ? 'fail' : 'warn',
     agreed
       ? 'The hooks and the CLI scripts resolve the same data root.'

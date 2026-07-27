@@ -5,8 +5,7 @@
     "url": "https://github.com/Hbz00"
   },
   "metadata": {
-    "description": "Bounded autonomous software development for Claude Code.",
-    "version": "0.5.0"
+    "description": "Bounded autonomous software development for Claude Code."
   },
   "plugins": [
     {

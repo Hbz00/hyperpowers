@@ -2,9 +2,10 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { validate, assertSupported, SUPPORTED_KEYWORDS } from '../scripts/lib/validate.mjs';
 
-const SCHEMA_DIR = path.resolve(import.meta.dirname, '..', 'schemas');
+const SCHEMA_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'schemas');
 const load = (name) => JSON.parse(fs.readFileSync(path.join(SCHEMA_DIR, name), 'utf8'));
 
 describe('validator core', () => {

@@ -16,7 +16,7 @@ import { parseArgs, fail, emitJson, ok, resolveProjectRoot, resolveRunId } from 
 import { listRuns, artifacts } from './lib/paths.mjs';
 import { readJson, readText, writeFileAtomic } from './lib/io.mjs';
 import { tryLoadState, loadState } from './lib/state.mjs';
-import { REVIEW_ROUNDS, EXTRA_ROUNDS, PHASES } from './lib/phases.mjs';
+import { REVIEW_ROUNDS, EXTRA_ROUNDS, PHASES, TERMINAL_PHASES } from './lib/phases.mjs';
 import { summarise, scoreAgainstTargets } from './lib/telemetry.mjs';
 import { analyseTranscript } from './lib/transcript.mjs';
 
@@ -68,9 +68,16 @@ function renderFinal() {
   const p = (...lines) => L.push(...lines);
 
   p(`# Hyperpowers run report — ${runId}`, '');
-  p(`**Outcome:** ${state.phase}${state.blocked ? ` — ${state.blocked}` : ''}  `);
+  // `state.phase` is whatever the run is in *right now*. The phase table requires this report to
+  // exist before `FINAL_ACCEPTANCE → COMPLETE`, so a report generated once records the phase it was
+  // written in, not the outcome. History is authoritative: if a terminal phase was reached, that is
+  // the outcome, and its transition — not `updatedAt`, which any later probe moves — is the finish.
+  const terminal = [...(state.history ?? [])].reverse().find((h) => TERMINAL_PHASES.includes(h.to));
+  const outcome = terminal?.to ?? state.phase;
+  p(`**Outcome:** ${outcome}${state.blocked ? ` — ${state.blocked}` : ''}` +
+    (terminal ? '' : ' *(not terminal yet — regenerate this report after the final transition)*') + '  ');
   p(`**Started:** ${state.createdAt}  `);
-  p(`**Finished:** ${state.updatedAt}  `);
+  p(`**Finished:** ${terminal?.at ?? state.updatedAt}  `);
   p(`**Duration:** ${humanDuration(Date.parse(state.updatedAt) - Date.parse(state.createdAt))}`, '');
 
   p('## What was asked for', '', state.request?.description || '(not recorded)', '');
@@ -131,6 +138,15 @@ function renderFinal() {
 
   // --- risks -------------------------------------------------------------------
   p('## Residual risks and what was not verified', '');
+  // Conditions the completion gate could not evaluate. It passes on them by design — a condition it
+  // cannot judge is never silently counted as a pass — but the contract only permits that as
+  // *stated* residual risk, so the statement has to appear here rather than depend on the director
+  // remembering to write it.
+  for (const [name, record] of Object.entries(state.gates ?? {})) {
+    for (const item of record.unverifiable ?? []) {
+      p(`- **Not verifiable by the ${name} gate** — ${item}`);
+    }
+  }
   const risks = [
     // Recorded risks are objects (`risk`, `source`); reviewer-reported ones are plain strings.
     ...(state.residualRisks ?? []).map((r) => (typeof r === 'string' ? r : `${r.risk}${r.source ? ` (${r.source})` : ''}`)),

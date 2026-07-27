@@ -617,7 +617,7 @@ the director tier is not the configured model.
 ADR-0001 now rests on the shipped configuration, not an analogue.
 
 ### J7. Test suite — **all passing**
-`npm test`: 278 Git-policy conformance cases, state-machine and hook integration tests (driving
+`npm test`: 293 Git-policy conformance cases, state-machine and hook integration tests (driving
 the real scripts as subprocesses with real hook payloads), gate-reachability tests, an
 end-to-end run-lifecycle walk, and schema/validator tests. `npm run docs:check` verifies the
 generated workflow reference matches the state machine.
@@ -1099,7 +1099,7 @@ the `-c` script of a shell binary, keyed on *any* executor word so `xargs sh -c`
 `nice bash -lc` are covered (the wrapper-shaped miss that defeated the first version of the
 stdin-as-script rule). Used as data it stays ordinary work: `echo "$(date)"`,
 `cat "$(ls -t | head -1)"`, `node -e "$(cat s.js)"` and `FOO=$(date) npm test` all still pass.
-Seven denials and seven controls added; the table is now **278** cases.
+Seven denials and seven controls added; the table stood at **278** cases (§Q1 later took it to 293).
 
 **The function-definition ban was left in place.** The argument for narrowing it depended on body
 classification being sufficient, and the finding above is the counterexample: a body containing
@@ -1692,6 +1692,28 @@ Fixed by making the skill give the command and say what a hand-written report si
 - A dispatch's token count was read **mid-flight** and reported as final, understating the design
   coordinator by half. Live counters are comparable only at a dispatch boundary — the same error
   `judge2.mjs` hashes files to prevent, committed by its author.
+
+---
+
+### Q5. The Opus coordinators never invoked a Superpowers skill — measured
+
+Both `opus-plan-coordinator` and `opus-execution-coordinator` said *"Apply `superpowers:writing-plans`"*
+and *"Apply `superpowers:executing-plans`"*. Neither declares the `Skill` tool. Tool-call census of a
+complete run (`20260727T112013Z-uzte5d`):
+
+| agent | tools actually called | `Skill` attempts |
+| --- | --- | ---: |
+| `opus-plan-coordinator` | Read ×6, Bash ×15, Write ×3 | **0** |
+| `opus-execution-coordinator` | Read ×4, Bash ×15, Agent ×2 | **0** |
+
+The plan and the execution both succeeded — plan gate 15/15, every package accepted — because the
+method is reproduced in the agent prompts. So the claim was inaccurate, not the behaviour.
+
+Resolved by owning the adaptation: both prompts now say the method is Superpowers' *adapted and
+reproduced here*, and say why invoking it would be wrong — it would import the very instructions
+`superpowers-adaptation.md` overrides. Superpowers remains a genuine runtime dependency at the one
+place it is genuinely invoked: the **director** calls `superpowers:brainstorming`, and it holds the
+`Skill` tool. The preflight version gate therefore stays.
 
 ---
 

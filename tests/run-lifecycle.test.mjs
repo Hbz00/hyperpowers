@@ -24,8 +24,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(import.meta.dirname, '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let TMP, PROJECT, DATA, RUN, RUNDIR;
 
 const env = () => ({ ...process.env, HYPERPOWERS_DATA_ROOT: DATA, CLAUDE_PLUGIN_ROOT: ROOT });

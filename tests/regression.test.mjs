@@ -15,11 +15,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { renderPack } from '../scripts/lib/review-pack.mjs';
 import { ALL_ROUNDS, EXTRA_ROUNDS, REVIEW_ROUNDS } from '../scripts/lib/phases.mjs';
 import { summarise } from '../scripts/lib/telemetry.mjs';
 
-const ROOT = path.resolve(import.meta.dirname, '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let TMP, PROJECT, DATA, RUN, RUNDIR;
 
 const env = () => ({
@@ -1218,5 +1219,221 @@ describe('§P9 — the final report is generated, not authored', () => {
     for (const section of ['Product view', 'Cost and work distribution', 'Adversarial reviews']) {
       assert.ok(src.includes(section), `report.mjs must still emit "${section}"`);
     }
+  });
+});
+
+/**
+ * §Q2 — two installations on one machine must not silently split the run.
+ *
+ * `hyperpowers-hyperpowers` (marketplace) and `hyperpowers-inline` (`--plugin-dir`) can coexist.
+ * Resolution used to pick the most recently touched one: reproduced on a real machine, an empty
+ * directory created minutes earlier by `claude plugin install` outranked the one holding every run,
+ * and `describeDataRoot()` called it trusted. The marker could not settle it either — it recorded
+ * only that a directory had resolved to itself, which is true of any directory that ever stamped
+ * one. That is §O1's failure through a second door: CLI scripts write one place, hooks read
+ * another, and the run still looks healthy.
+ */
+describe('§Q2 — the data root is chosen by identity, not by recency', () => {
+  let QTMP;
+
+  before(() => {
+    QTMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-identity-'));
+  });
+
+  after(() => {
+    try { fs.rmSync(QTMP, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  const paths = async (env) => {
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    // A fresh module instance per case: PLUGIN_ROOT and the resolution are evaluated at import.
+    const mod = await import(`../scripts/lib/paths.mjs?identity=${Math.random()}`);
+    Object.keys(env).forEach((k) => { delete process.env[k]; });
+    Object.assign(process.env, saved);
+    return mod;
+  };
+
+  test('a marked directory beats a newer unmarked one', async () => {
+    const home = path.join(QTMP, 'data');
+    const older = path.join(home, 'hyperpowers-inline');
+    const newer = path.join(home, 'hyperpowers-hyperpowers');
+    const foreign = path.join(home, 'codex-openai-codex');
+    for (const d of [older, newer, foreign]) fs.mkdirSync(d, { recursive: true });
+    // `newer` is touched last, so recency would choose it.
+    fs.utimesSync(older, new Date(1), new Date(1));
+    fs.writeFileSync(path.join(older, '.data-root.json'), JSON.stringify({
+      resolved: older, pluginRoot: ROOT, pluginVersion: '0.0.0', stampedAt: new Date().toISOString(),
+    }));
+
+    const m = await paths({ CLAUDE_PLUGIN_DATA: foreign, CLAUDE_PLUGIN_ROOT: ROOT });
+    delete process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.CLAUDE_PLUGIN_DATA = foreign;
+    try {
+      assert.equal(m.dataRoot(), older, 'the directory claiming this installation must win');
+      assert.equal(m.dataRootIsAmbiguous(), null, 'a matched marker is not ambiguous');
+    } finally {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    }
+  });
+
+  test('two unmarked candidates are ambiguous rather than resolved by mtime', async () => {
+    const home = path.join(QTMP, 'data2');
+    const a = path.join(home, 'hyperpowers-inline');
+    const b = path.join(home, 'hyperpowers-hyperpowers');
+    const foreign = path.join(home, 'codex-openai-codex');
+    for (const d of [a, b, foreign]) fs.mkdirSync(d, { recursive: true });
+
+    const m = await paths({ CLAUDE_PLUGIN_DATA: foreign, CLAUDE_PLUGIN_ROOT: ROOT });
+    delete process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.CLAUDE_PLUGIN_DATA = foreign;
+    try {
+      const rival = m.dataRootIsAmbiguous();
+      assert.ok(Array.isArray(rival) && rival.length === 2, `expected two candidates, got ${JSON.stringify(rival)}`);
+      assert.equal(m.describeDataRoot().trusted, false, 'a guess must not be reported as trusted');
+      // And it must not cure itself by stamping whichever it guessed.
+      m.markDataRootAuthoritative();
+      assert.ok(!fs.existsSync(path.join(a, '.data-root.json')), 'an ambiguous root must not be stamped');
+      assert.ok(!fs.existsSync(path.join(b, '.data-root.json')), 'an ambiguous root must not be stamped');
+    } finally {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    }
+  });
+
+  test('a marker without an identity claim does not count as agreement', async () => {
+    const home = path.join(QTMP, 'data3');
+    const only = path.join(home, 'hyperpowers-inline');
+    fs.mkdirSync(only, { recursive: true });
+    fs.writeFileSync(path.join(only, '.data-root.json'), JSON.stringify({ resolved: only, stampedAt: 'x' }));
+
+    const m = await paths({ HYPERPOWERS_DATA_ROOT: only, CLAUDE_PLUGIN_ROOT: ROOT });
+    process.env.HYPERPOWERS_DATA_ROOT = only;
+    try {
+      assert.equal(m.dataRootAgreesWithHooks(), false, 'a self-referential marker proves nothing');
+    } finally {
+      delete process.env.HYPERPOWERS_DATA_ROOT;
+    }
+  });
+});
+
+/**
+ * §Q4 — a gate verdict judges a state, not a run.
+ *
+ * Reproduced before the fix: record a passing completion gate, insert a critical open blocker, and
+ * `checkRequirement(…, 'gate:completion')` still returned `ok: true`, so `COMPLETE` was reachable
+ * on a judgement of an earlier run. "Re-run the verifier first" was a prompt instruction, and an
+ * instruction is not an invariant.
+ */
+describe('§Q4 — a stale gate verdict does not satisfy a transition', () => {
+  test('the verdict is void once the run has changed', async () => {
+    const { newState, saveState, checkRequirement, mutateState } = await import('../scripts/lib/state.mjs');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-stale-'));
+    const prev = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = path.join(tmp, 'data');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    try {
+      const s = newState({ runId: 'R1', sessionId: 'S1', projectRoot: proj, description: 'stale-gate probe' });
+      s.phase = 'FINAL_ACCEPTANCE';
+      saveState(proj, 'R1', s);
+      const { gateInputDigest } = await import('../scripts/lib/state.mjs');
+      s.gates = { completion: { passed: true, at: new Date().toISOString(), inputs: gateInputDigest(proj, 'R1', s), reason: null, evidence: '24/24' } };
+      saveState(proj, 'R1', s);
+      assert.equal(checkRequirement(proj, 'R1', s, 'gate:completion').ok, true, 'a fresh verdict must hold');
+
+      // Bookkeeping that cannot affect the verdict must not invalidate it.
+      const bumped = mutateState(proj, 'R1', (st) => { st.turn = { promptId: 'p', blocks: 3 }; });
+      assert.equal(checkRequirement(proj, 'R1', bumped, 'gate:completion').ok, true,
+        'unrelated state churn must not void a verdict');
+
+      const after = mutateState(proj, 'R1', (st) => {
+        st.openBlockers = [{ id: 'IMPL-999', severity: 'critical', status: 'open' }];
+      });
+      const verdict = checkRequirement(proj, 'R1', after, 'gate:completion');
+      assert.equal(verdict.ok, false, 'a verdict from before the blocker must not satisfy the gate');
+      assert.match(verdict.detail, /inputs have changed since/);
+    } finally {
+      if (prev === undefined) delete process.env.HYPERPOWERS_DATA_ROOT;
+      else process.env.HYPERPOWERS_DATA_ROOT = prev;
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+});
+
+/**
+ * §Q3 — the contradictor's sandbox is not the project's to choose.
+ *
+ * `.hyperpowers.json` is deep-merged over the defaults, so every nested field was reachable —
+ * including `codex.sandbox`, which the adapter passes straight to the CLI. A project could set
+ * `danger-full-access` and turn the independent read-only reviewer into a writer, or repoint
+ * `codex.binary` and replace it, in a file the review pack excludes as Hyperpowers' own.
+ */
+describe('§Q3 — safety-critical settings are not overridable by a project file', () => {
+  test('the Codex sandbox and binary survive a hostile override', async () => {
+    const { loadConfig, DEFAULTS } = await import('../scripts/lib/config.mjs');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-cfg-'));
+    fs.writeFileSync(path.join(tmp, '.hyperpowers.json'), JSON.stringify({
+      codex: { sandbox: 'danger-full-access', binary: '/tmp/not-codex', timeoutMs: 1000 },
+      budgets: { maxCostUsd: 99999 },
+    }));
+    const cfg = loadConfig(tmp);
+    assert.equal(cfg.codex.sandbox, DEFAULTS.codex.sandbox, 'the sandbox must not be overridable');
+    assert.equal(cfg.codex.binary, DEFAULTS.codex.binary, 'the reviewer binary must not be swappable');
+    assert.equal(cfg.codex.timeoutMs, 1000, 'ordinary tuning still applies');
+    assert.equal(cfg.budgets.maxCostUsd, 99999, 'budgets remain the project’s to set');
+    assert.deepEqual(cfg.rejectedOverrides, ['codex.sandbox', 'codex.binary'], 'the refusal is reported, not silent');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+/**
+ * §Q5/Q7 — the three arbitrations, where a prompt or a document could quietly drift back.
+ */
+describe('§Q5 — the coordinators own their method instead of claiming to invoke it', () => {
+  const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+
+  test('neither Opus coordinator claims to apply a Superpowers skill it cannot call', () => {
+    for (const agent of ['opus-plan-coordinator', 'opus-execution-coordinator']) {
+      const text = read(`agents/${agent}.md`);
+      assert.doesNotMatch(text, /^Apply `superpowers:/m,
+        `${agent} claims a runtime invocation; it has no Skill tool and a measured run shows zero attempts`);
+      assert.doesNotMatch(text.split('\n').find((l) => l.startsWith('tools:')) ?? '', /\bSkill\b/,
+        `${agent} would need the Skill tool for that claim to be true`);
+    }
+  });
+
+  test('the director keeps the tool it genuinely uses', () => {
+    // `superpowers:brainstorming` really is invoked, which is what still justifies the version gate.
+    assert.match(read('skills/feature/SKILL.md'), /superpowers:brainstorming/);
+  });
+});
+
+describe('§Q7 — the advisor is recommended, and setup does not guess about restarts', () => {
+  test('the advisor key is written but never required', async () => {
+    const { REQUIRED_ENV, RECOMMENDED_ENV } = await import('../scripts/lib/config.mjs');
+    assert.ok(!('CLAUDE_CODE_DISABLE_ADVISOR_TOOL' in REQUIRED_ENV),
+      'requiring it made preflight refuse a run over a setting no run mechanism reads');
+    assert.ok('CLAUDE_CODE_DISABLE_ADVISOR_TOOL' in RECOMMENDED_ENV);
+  });
+
+  test('the README no longer tells the user to do something preflight rejects', () => {
+    const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+    assert.match(readme, /not required/i);
+    assert.doesNotMatch(readme, /nothing else depends on it/);
+  });
+
+  test('setup reports the restart question as unanswerable rather than answering it wrongly', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'setup.mjs'), 'utf8');
+    assert.match(src, /unknown_until_preflight/);
+    assert.doesNotMatch(src, /restartRequired: !active/);
+  });
+});
+
+describe('§Q6 — a gate that tolerates an unverifiable condition still has to state it', () => {
+  test('the verifier persists the unverifiable ids and the report renders them', () => {
+    assert.match(fs.readFileSync(path.join(ROOT, 'scripts', 'verify-completion.mjs'), 'utf8'),
+      /unverifiable: unverifiable\.map/);
+    assert.match(fs.readFileSync(path.join(ROOT, 'scripts', 'report.mjs'), 'utf8'),
+      /Not verifiable by the \$\{name\} gate/);
   });
 });

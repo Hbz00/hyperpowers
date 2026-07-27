@@ -10,6 +10,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { classifyCommand, touchesGitInternals } from '../scripts/lib/git-policy.mjs';
 import { splitCommands, tokenize } from '../scripts/lib/shell-parse.mjs';
 
@@ -25,6 +26,17 @@ const ALLOWED = [
   'git diff HEAD~3..HEAD -- src/',
   'git log --oneline -20',
   'git show HEAD:src/app.py',
+  // Resolver builtins that bind an *unprotected* name, and uses of those words that are not
+  // command position. Denying these would be the false positive that §O9 warns is how bypasses
+  // get found.
+  'hash -r',
+  'hash -p /usr/local/bin/node node',
+  'hash node=/usr/local/bin/node',
+  'hash -p /usr/bin/git mygit',
+  "alias ll='ls -la'",
+  'autoload -Uz compinit',
+  'echo hash -p /usr/bin/touch git',
+
   'git ls-files',
   'git rev-parse --show-toplevel',
   'git merge-base main HEAD',
@@ -155,6 +167,20 @@ const DENIED = [
   // Unknown git subcommands fail closed
   ['git frobnicate --all', /not on the Hyperpowers read-only allowlist|denied/i],
   ['git some-plugin-command', /allowlist|denied/i],
+
+  // Rebinding a validated name through the shell's command resolver. Every one of these was
+  // executed before it was added: `hash -p /usr/bin/touch git; git status` runs touch and creates
+  // a file called `status`, and this classifier used to report it as an approved read. A rebound
+  // `git` running `/usr/bin/git push` leaves no local drift either, so the PostToolUse fingerprint
+  // cannot compensate afterwards.
+  ['hash -p /usr/bin/touch git; git status', /rebinds a name/i],
+  ['hash git=/usr/bin/touch; git status', /rebinds a name/i],
+  ["bash -c 'hash -p /usr/bin/touch git; git status'", /rebinds a name/i],
+  ['enable -f /tmp/evil.so git', /rebinds a name/i],
+  ['autoload -Uz git; git status', /rebinds a name/i],
+  ['alias git=/usr/bin/touch', /rebinds a name/i],
+  ['hash -p /bin/echo bash; bash -c \'git status\'', /rebinds a name/i],
+  ['FOO=1 hash -p /usr/bin/touch git', /rebinds a name/i],
 
   // Read-only subcommands with writing options
   ['git diff --output=patch.txt', /writes a file|forbidden/i],
@@ -522,7 +548,7 @@ const COUNT_DOCS = ['README.md', 'docs/validation-ledger.md', 'docs/adr/0003-git
 
 describe('the documented case count matches this table', () => {
   const CASES = ALLOWED.length + ALLOWED_REGRESSIONS.length + DENIED.length;
-  const readDoc = (file) => fs.readFileSync(path.join(import.meta.dirname, '..', file), 'utf8');
+  const readDoc = (file) => fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', file), 'utf8');
 
   for (const [file, pattern] of [
     ['README.md', /(\d+)-case conformance table/],
@@ -542,7 +568,9 @@ describe('the documented case count matches this table', () => {
 
   // Figures the prose quotes on purpose: the table's first-draft size, and the count of cases the
   // second probe contributed. Anything else near "case"/"cases" is a stale count until proven not.
-  const HISTORICAL = new Set([171, 29]);
+  // Counts the prose states *about the past* on purpose: 171 was the first draft, 29 the fifth
+  // probe round's additions, 278 the size before §Q1's resolver-rebinding cases.
+  const HISTORICAL = new Set([171, 29, 278]);
 
   for (const file of COUNT_DOCS) {
     test(`${file} states no other case count`, () => {

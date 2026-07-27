@@ -131,18 +131,30 @@ export function checkRequirement(projectRoot, runId, state, requirement) {
     return { ok: true, detail: `${decisions.length} findings adjudicated` };
   }
 
-  // A gate requirement reads the verdict `verify-completion.mjs` *stored*, not a fresh
-  // evaluation — the verifier is the only writer, so this cannot be forged, but it is a
-  // snapshot. Evidence that arrives between the verifier running and the transition (a git
-  // mutation detected by the PostToolUse guard, say) is not reflected until the gate is re-run.
-  // Re-running it before transitioning is cheap and is what the phase instructions tell the
-  // director to do.
+  // A gate requirement reads the verdict `verify-completion.mjs` stored — the verifier is the only
+  // writer, so it cannot be forged — but a verdict judges a *state*, not a run.
+  //
+  // Reproduced: record a passing completion gate, insert a critical open blocker, and the stored
+  // `passed` still satisfied the requirement, so `COMPLETE` was reachable on a judgement of an
+  // earlier run. "Re-run the verifier first" was an instruction to the director, and an instruction
+  // is not an invariant. The revision counter moves on every mutation, so binding the verdict to
+  // the revision it judged makes staleness mechanical: anything that changes the run — a new
+  // blocker, fresh evidence, detected Git drift, an edited control file — invalidates it.
   if (requirement.startsWith('gate:')) {
     const gate = requirement.slice('gate:'.length);
     const record = state.gates?.[gate];
     if (!record) return { ok: false, detail: `gate ${gate} not evaluated` };
     if (!record.passed) return { ok: false, detail: `gate ${gate} failed: ${record.reason ?? 'unknown'}` };
-    return { ok: true, detail: `gate ${gate} passed at ${record.at} (stored verdict; re-run the verifier if the run has changed since)` };
+    const now = gateInputDigest(projectRoot, runId, state);
+    if (record.inputs && record.inputs !== now) {
+      return {
+        ok: false,
+        detail: `gate ${gate} passed at ${record.at}, but its inputs have changed since — a new ` +
+          `blocker, a changed decision, fresh evidence, a task status or detected Git drift. Re-run ` +
+          `\`verify-completion.mjs --gate ${gate}\`: a verdict does not carry over to a state it did not judge.`,
+      };
+    }
+    return { ok: true, detail: `gate ${gate} passed at ${record.at}${record.inputs ? '' : ' (inputs unrecorded)'}` };
   }
 
   if (requirement === 'tasks:all-accepted') {
@@ -293,6 +305,37 @@ export function transition(projectRoot, runId, to, meta = {}) {
  * escalated. Attempting is not progress; only a changed *outcome* is. The attempt count is still
  * recorded and reported, it just cannot vouch for itself here.
  */
+/**
+ * A fingerprint of everything a gate verdict depends on.
+ *
+ * Deliberately *not* `state.revision`: the revision counts every mutation, including the Stop
+ * controller's own bookkeeping, so binding a verdict to it made `COMPLETE` unreachable — the
+ * reachability test caught that within one run of the suite, which is what it is for. What must
+ * invalidate a verdict is a change to what it judged: blockers, decisions, review outcomes, task
+ * statuses, evidence and observed Git drift. Everything else may move freely between the verifier
+ * and the transition.
+ */
+export function gateInputDigest(projectRoot, runId, state) {
+  const a = artifacts(projectRoot, runId);
+  const tasks = readJson(a.tasks, { tasks: [] });
+  const evidence = readJson(a.evidence, null);
+  return sha256([
+    (state.openBlockers ?? []).map((b) => `${b.id}:${b.status ?? 'open'}`).sort().join(','),
+    Object.entries(state.adjudications ?? {})
+      .map(([round, v]) => `${round}:${(v.decisions ?? []).map((d) => `${d.finding_id}:${d.decision}:${d.resolved ? 1 : 0}`).sort().join('|')}`)
+      .sort().join(';'),
+    Object.entries(state.reviews ?? {}).map(([r, v]) => `${r}:${v?.verdict ?? v?.status ?? ''}`).sort().join(','),
+    (tasks.tasks ?? []).map((t) => `${t.id}:${t.status}`).sort().join(','),
+    evidence
+      ? [
+          ...(evidence.criteria ?? []).map((c) => `${c.id}:${c.status}`),
+          ...(evidence.checks ?? []).map((c) => `${c.name}:${c.status}`),
+        ].sort().join(',')
+      : 'no-evidence',
+    String((state.gitDrift ?? []).length),
+  ].join('|'));
+}
+
 export function progressSignature(projectRoot, runId, state) {
   const a = artifacts(projectRoot, runId);
   const tasks = readJson(a.tasks, { tasks: [] });

@@ -16,7 +16,7 @@ It never touches Git. You do all of that yourself.
 ```
 /plugin marketplace add Hbz00/hyperpowers
 /plugin install hyperpowers
-/hyperpowers:setup          # writes the environment contract; it says if a restart is needed
+/hyperpowers:setup          # writes the environment contract, then tells you to confirm it with preflight
 /hyperpowers:feature <what you want built>
 ```
 
@@ -61,8 +61,9 @@ reason, which is a better outcome than a confident `COMPLETE` on unproven work.
 One side effect worth knowing before you install: `/hyperpowers:setup` disables Claude Code's
 advisor tool for the project, so that escalation goes up this plugin's ladder and lands in its
 ledger. Unlike the Git policy, that applies to **every** session in the project, not only to
-Hyperpowers runs. Remove `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` from `.claude/settings.json` if you
-would rather keep it — nothing else depends on it.
+Hyperpowers runs. It is the one setting written but **not required**: preflight reports it as a
+warning rather than refusing to start, so remove it from `.claude/settings.json` if you would
+rather keep the advisor. No run mechanism reads it.
 
 Install it *before* the session you intend to run it in. Its `SessionStart` hook stamps the
 directory the hooks and the CLI scripts must agree on, so a plugin installed mid-session fails
@@ -140,7 +141,7 @@ npm test          # the whole suite — 427 tests
 npm run check     # tests + a check that generated docs are in sync
 ```
 
-The Git policy carries a 278-case conformance table (`tests/git-policy.test.mjs`). Every case added
+The Git policy carries a 293-case conformance table (`tests/git-policy.test.mjs`). Every case added
 after the first draft is a real defect found by adversarial probing *outside* the table — five
 separate rounds of it, each finding holes the previous round's fixes did not generalise to. The
 fourth found a one-token defeat of the whole policy, and one of its bypasses was created by the

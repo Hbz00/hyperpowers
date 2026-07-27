@@ -18,7 +18,7 @@ import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './l
 import { artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { validate } from './lib/validate.mjs';
 import { readJson, readText, nowIso } from './lib/io.mjs';
-import { loadState, mutateState } from './lib/state.mjs';
+import { loadState, mutateState, gateInputDigest } from './lib/state.mjs';
 import { REVIEW_ROUNDS, EXTRA_ROUNDS, ALL_ROUNDS } from './lib/phases.mjs';
 import { logEvent } from './lib/telemetry.mjs';
 import { gitLines } from './lib/review-pack.mjs';
@@ -76,7 +76,20 @@ function main() {
 
   try {
     mutateState(projectRoot, runId, (s) => {
-      s.gates[gate] = { passed, at: result.evaluatedAt, reason: passed ? null : failed.map((f) => f.id).join(', '), evidence: `${conditions.filter((c) => c.status === 'pass').length}/${conditions.length} conditions passed` };
+      // The revision this verdict judged. `mutateState` bumps it after this callback returns, so
+      // the verdict is stamped with the state it will land in rather than the one it read.
+      // `unverifiable` is tolerated by the gate but must not vanish with it. The contract says the
+      // director may accept such a condition *as stated residual risk*; storing only a pass/fail and
+      // a count left nothing for the report to state, so the acceptance existed only in whatever the
+      // director happened to write. The ids are cheap and make the toleration auditable.
+      s.gates[gate] = {
+        passed,
+        at: result.evaluatedAt,
+        inputs: gateInputDigest(projectRoot, runId, s),
+        reason: passed ? null : failed.map((f) => f.id).join(', '),
+        unverifiable: unverifiable.map((c) => `${c.id}: ${c.detail ?? 'no detail'}`),
+        evidence: `${conditions.filter((c) => c.status === 'pass').length}/${conditions.length} conditions passed`,
+      };
     });
     logEvent(projectRoot, runId, { type: 'gate', gate, passed, failed: failed.map((f) => f.id) });
   } catch { /* gate recording must not mask the result */ }

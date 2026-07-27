@@ -185,9 +185,39 @@ function deepMerge(base, override) {
  * Load effective config. Project overrides live in `.hyperpowers.json` at the project root —
  * a normal, reviewable file rather than hidden state.
  */
+/**
+ * Settings a project file may never set, because they are the guarantees rather than the tuning.
+ *
+ * `.hyperpowers.json` is deep-merged over the defaults, which made every nested field reachable —
+ * including `codex.sandbox`. A project could set `danger-full-access` and the adapter passed it
+ * straight to the CLI, turning the independent read-only contradictor into a writer; `codex.binary`
+ * could replace the contradictor outright. Neither field is advertised as configurable, and both
+ * are excluded from the review pack as Hyperpowers' own file, so the change would be invisible to
+ * the reviewer it subverts.
+ */
+const IMMUTABLE_PATHS = Object.freeze([
+  ['codex', 'sandbox'],
+  ['codex', 'binary'],
+  ['git', 'mode'],
+]);
+
+function stripImmutable(overrides) {
+  const rejected = [];
+  const clone = JSON.parse(JSON.stringify(overrides));
+  for (const [group, key] of IMMUTABLE_PATHS) {
+    if (clone?.[group] && Object.prototype.hasOwnProperty.call(clone[group], key)) {
+      rejected.push(`${group}.${key}`);
+      delete clone[group][key];
+    }
+  }
+  return { clone, rejected };
+}
+
 export function loadConfig(projectRoot) {
-  const overrides = readJson(path.join(projectRoot, '.hyperpowers.json'), null);
+  const raw = readJson(path.join(projectRoot, '.hyperpowers.json'), null);
+  const { clone: overrides, rejected } = raw ? stripImmutable(raw) : { clone: null, rejected: [] };
   let config = overrides ? deepMerge(DEFAULTS, overrides) : DEFAULTS;
+  if (rejected.length) config = { ...config, rejectedOverrides: rejected };
 
   const envCap = Number(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP);
   if (Number.isFinite(envCap) && envCap > 0) {
@@ -212,10 +242,7 @@ export const REQUIRED_ENV = Object.freeze({
     value: String(DEFAULTS.stop.blockCap),
     why: 'A whole feature runs inside one turn, so the consecutive-block cap must cover the run (spec §16.2).',
   },
-  CLAUDE_CODE_DISABLE_ADVISOR_TOOL: {
-    value: '1',
-    why: 'Hyperpowers supplies its own escalation path; a second advisor would arbitrate outside the ledger (spec §17).',
-  },
+
   CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: {
     value: '1',
     why: 'Removes the built-in commit/PR guidance that contradicts the read-only Git policy (spec §17).',
@@ -223,6 +250,23 @@ export const REQUIRED_ENV = Object.freeze({
   CLAUDE_CODE_DISABLE_WORKFLOWS: {
     value: '1',
     why: 'Workflow orchestration would run outside the state machine and its accounting (spec §17).',
+  },
+});
+
+/**
+ * Written by setup and reported by preflight, but never required.
+ *
+ * Spec §17 asks for the advisor to be off so escalation goes up this plugin's ladder and lands in
+ * its ledger. That is a purity property, not a safety one: no run mechanism reads the variable, and
+ * nothing breaks mechanically when an advisor exists. Its cost, however, is borne *outside* runs —
+ * the variable is project-scoped, so requiring it took the advisor away from every ordinary session
+ * in that repository. Refusing to start a run over it was disproportionate, and it contradicted the
+ * README, which tells the user they may remove it. Reported, not enforced.
+ */
+export const RECOMMENDED_ENV = Object.freeze({
+  CLAUDE_CODE_DISABLE_ADVISOR_TOOL: {
+    value: '1',
+    why: 'Hyperpowers supplies its own escalation path; a second advisor would arbitrate outside the ledger (spec §17). Optional: no run mechanism reads it.',
   },
 });
 

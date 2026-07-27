@@ -306,6 +306,17 @@ function classifyRecursive(command, context, seen, depth) {
   if (seen.has(command)) return ALLOW; // already analysed this exact fragment
   seen.add(command);
 
+  const rebinding = resolverRebindingIn(command);
+  if (rebinding) {
+    return deny(
+      `\`${rebinding}\` rebinds a name this policy validates, so a later use of that name would ` +
+        `run something other than the program that was checked — measured: \`hash -p /usr/bin/touch ` +
+        `git; git status\` runs touch and this classifier reported it as an approved read. Bind a ` +
+        `different name, or call the program by its path.`,
+      { rebinding },
+    );
+  }
+
   const definition = functionDefinitionIn(command);
   if (definition) {
     return deny(
@@ -376,6 +387,80 @@ const UNREBINDABLE = new Set([
  * a plain `git status` read while every subsequent `git` in that shell ran attacker-chosen code.
  * Both POSIX forms are recognised: `name()` and `function name`.
  */
+/**
+ * Builtins that can make a name resolve to something other than the program on `PATH`.
+ *
+ * The whole allowlist rests on one unstated assumption: that the word `git` still denotes Git when
+ * the shell runs it. A function definition was the first way found to break that (§O9's sibling);
+ * these are the rest, and each one below was *executed* rather than reasoned about:
+ *
+ *   hash -p /usr/bin/touch git ; git status     bash — ran touch, created a file named `status`
+ *   hash git=/usr/bin/touch ; git status        zsh  — same, and zsh is this harness's shell
+ *   autoload -Uz git ; git status               zsh  — ran a function loaded from `fpath`
+ *   alias git=… <newline> git status            bash with `expand_aliases` — ran the alias
+ *   alias git=… ; eval "git status"             zsh  — `eval` re-parses, so the alias applies
+ *   enable -f loadable.so git                   bash — documented; not executed here, no loadable
+ *
+ * Two forms were tried and do **not** work, so they are deliberately not denied: a single-line
+ * `alias git=… ; git status` in either shell, because aliases are expanded when the line is
+ * parsed and the alias does not exist yet. They are covered anyway, because the two forms that do
+ * work differ only in whitespace and would otherwise be a distinction the caller controls.
+ *
+ * This matters more than the opaque-script limit ADR-0003 already documents: there the policy says
+ * it cannot see inside; here it reported that it had successfully classified `git status`. And a
+ * rebound `git` that runs `/usr/bin/git push` leaves no local drift, so `git-guard.mjs` cannot
+ * compensate for it afterwards.
+ */
+const RESOLVER_BUILTINS = new Set(['hash', 'enable', 'alias', 'autoload']);
+
+/**
+ * Protected name rebound by a resolver builtin anywhere in the command, or `null`.
+ *
+ * Quoting is not consulted for the builtin's own name: `"hash" -p /usr/bin/touch git` runs the
+ * builtin exactly as the bare form does, which is the same reasoning `scriptBuiltByExpansion`
+ * records for `eval`.
+ */
+function resolverRebindingIn(command) {
+  let tokens;
+  try {
+    ({ tokens } = tokenize(String(command ?? '')));
+  } catch {
+    return null; // an unparseable command is denied by the caller's own fail-closed path
+  }
+  const protectedName = (name) => UNREBINDABLE.has(String(name ?? '').toLowerCase());
+
+  // Command position only. Scanning for the word anywhere denied `echo hash -p /usr/bin/touch git`,
+  // and a false positive is not a harmless over-denial here: §O9 records that chasing one is how
+  // four real bypasses were found, so the cheap precision is worth taking.
+  const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+  let atCommandStart = true;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (t.type !== 'word') { atCommandStart = true; continue; }
+    const text = String(t.value.text ?? '');
+    const inCommandPosition = atCommandStart;
+    // `FOO=1 hash …` — leading assignments precede the command name without ending it.
+    if (!ASSIGNMENT.test(text)) atCommandStart = false;
+    if (!inCommandPosition) continue;
+    if (!RESOLVER_BUILTINS.has(basenameOf(text).toLowerCase())) continue;
+
+    // Arguments of *this* command only — an operator ends it, so `hash -r; touch git` is not a
+    // rebinding and stays allowed.
+    for (let j = i + 1; j < tokens.length && tokens[j].type === 'word'; j += 1) {
+      const word = String(tokens[j].value.text ?? '');
+      let candidate;
+      if (word.includes('=')) candidate = word.slice(0, word.indexOf('='));
+      else if (word.includes('/')) continue; // a path argument is the target, never the bound name
+      else if (word.startsWith('-')) continue; // a flag
+      else candidate = word;
+      if (protectedName(candidate)) {
+        return `${t.value.text} ${word}`;
+      }
+    }
+  }
+  return null;
+}
+
 function functionDefinitionIn(command) {
   let tokens;
   try {

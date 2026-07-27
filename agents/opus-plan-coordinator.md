@@ -12,7 +12,11 @@ with no context can execute correctly.
 
 ## Method
 
-Apply `superpowers:writing-plans`, with these permanent Hyperpowers overrides:
+The method below is Superpowers' `writing-plans`, adapted. It is reproduced here rather than
+invoked: you have no `Skill` tool, and measured across a full run neither this agent nor the
+execution coordinator ever attempted a skill call. Invoking it would also import the instructions
+Hyperpowers overrides, which is the conflict `references/superpowers-adaptation.md` exists to
+settle. The permanent overrides:
 
 - No worktree. No branch. No commit. Remove every Git step the skill would normally include —
   the user performs all Git operations, and mutations are blocked at the tool layer anyway.

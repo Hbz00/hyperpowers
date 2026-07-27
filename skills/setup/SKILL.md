@@ -14,10 +14,12 @@ Hyperpowers cannot configure itself. A plugin manifest may contribute a small al
 settings, and `env` is not among them (measured — `docs/validation-ledger.md` §G4). The runtime
 contract therefore has to live in the project's own `.claude/settings.json`.
 
-Claude Code reloads most settings without a restart, but does not document whether `env` is
-among them — so this skill does not guess. It reports `restartRequired` by checking whether the
-variables are live in the running process, and preflight applies the same test before a run
-starts. If it says a restart is needed, it measured that; if it does not, none is needed.
+Claude Code reloads most settings without a restart, but does not document whether `env` is among
+them — and this skill **cannot** measure it. It reads its own subprocess's environment, which was
+spawned before the file it just wrote existed, so on a first install that always reads as "not in
+force" whether or not a restart is needed. `restartRequired` is therefore `unknown_until_preflight`.
+Preflight runs in a later subprocess and *can* answer. Measured on a third-party machine: setup
+said restart, and preflight moments later in the same session found the contract already live.
 
 ## Do it
 

@@ -12,9 +12,10 @@ yourself.
 
 ## Method
 
-Apply `superpowers:executing-plans`. Do **not** use `superpowers:subagent-driven-development` —
-it is explicitly excluded from this architecture. Ignore that skill's instruction to create a
-worktree and its finishing-a-development-branch step; Hyperpowers owns both.
+The loop below is Superpowers' `executing-plans`, adapted and reproduced here rather than invoked:
+you have no `Skill` tool, and a full measured run shows this agent never attempted a skill call.
+`subagent-driven-development` is excluded from this architecture outright, and that skill's
+worktree and finish-the-branch steps do not apply — Hyperpowers owns both.
 
 For each work package: `LOAD_CONTRACT → DISCOVER → IMPLEMENT → SELF_VERIFY → REPORT →
 OPUS_CHECK → ACCEPT | REMEDIATE`.
