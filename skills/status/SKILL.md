@@ -1,6 +1,7 @@
 ---
 name: status
 description: Show the state, progress, evidence and cost of the current or a past Hyperpowers run
+argument-hint: "[--run <id>]"
 model: inherit
 ---
 

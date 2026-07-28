@@ -13,13 +13,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from '../../scripts/lib/cli.mjs';
 
 const { flags } = parseArgs();
 const model = flags.model ?? 'gpt-5.6-luna';
 const efforts = String(flags.efforts ?? 'low,high').split(',');
 const runs = Number(flags.runs ?? 1);
-const ROOT = path.resolve(import.meta.dirname, '..', '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const schema = path.join(ROOT, 'schemas', 'codex-review-output.schema.json');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-bench-'));

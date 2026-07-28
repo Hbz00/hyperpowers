@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { renderPack } from '../scripts/lib/review-pack.mjs';
 import { ALL_ROUNDS, EXTRA_ROUNDS, REVIEW_ROUNDS } from '../scripts/lib/phases.mjs';
@@ -425,10 +425,15 @@ describe('the gates run inside a real Git repository', () => {
     fs.mkdirSync(path.join(REPO, '.claude'), { recursive: true });
     fs.writeFileSync(path.join(REPO, '.claude', 'settings.json'), JSON.stringify({ env: { X: '1' } }));
     fs.writeFileSync(path.join(REPO, '.hyperpowers.json'), JSON.stringify({ budgets: {} }));
+    // `collectSections` resolves the run directory in-process, so it reads this suite's data
+    // root only if the environment says so — every other test here drives the CLI as a subprocess.
     const { collectSections } = await import('../scripts/lib/review-pack.mjs');
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = RDATA;
     const saved = process.cwd();
     const sections = collectSections(REPO, RRUN, 'implementation-1');
     process.chdir(saved);
+    if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT; else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
     const changed = sections.find((s) => s.title === 'CHANGED FILES');
     const untracked = sections.find((s) => s.title === 'UNTRACKED FILE INVENTORY');
     for (const s of [changed, untracked].filter(Boolean)) {
@@ -446,6 +451,79 @@ describe('the gates run inside a real Git repository', () => {
     const c = condition('13.10-no-out-of-scope-changes');
     assert.equal(c.status, 'fail', 'a baseline file the run modified is still out of scope');
     assert.match(c.detail, /legacy\.txt/);
+  });
+
+  /**
+   * §Q12 — the pack sent every work-package report twice and called the duplicates context.
+   *
+   * `reports/` holds the file an agent writes at the path its prompt gives it, the copy the
+   * validator stores under `-attempt<N>`, and the adjudication ledgers. Rendering the directory
+   * verbatim produced 13 blocks for 6 packages in the first production run — 24 kB of a 72 kB
+   * section — and that duplication is what pushed the locked plan out of the pack entirely.
+   */
+  test('the implementation pack renders one report per work package, latest attempt only', async () => {
+    const reports = path.join(RDIR, 'reports');
+    fs.mkdirSync(reports, { recursive: true });
+    const report = (id, attempt, evidence, stored = true) => ({
+      work_package_id: id, agent: 'sonnet-implementer', status: 'success', attempt,
+      files_read: [], files_modified: [], commands_run: [], results: [],
+      unverified: [], risks: [], evidence: [evidence], recommendation: 'accept',
+      ...(stored ? { storedAt: new Date(0).toISOString() } : {}),
+    });
+    // What a real run leaves behind: the agent's own draft at the path its prompt named, the
+    // validator's stored copy, a second attempt, and a ledger that is not a report at all.
+    // `sort()` puts `WP-001-attempt1.json` before `WP-001.json`, so the draft used to win.
+    fs.writeFileSync(path.join(reports, 'WP-001.json'), JSON.stringify(report('WP-001', 1, 'UNVALIDATED-DRAFT', false)));
+    fs.writeFileSync(path.join(reports, 'WP-001-attempt1.json'), JSON.stringify(report('WP-001', 1, 'FIRST-ATTEMPT')));
+    fs.writeFileSync(path.join(reports, 'WP-001-attempt2.json'), JSON.stringify(report('WP-001', 2, 'SECOND-ATTEMPT')));
+    fs.writeFileSync(path.join(reports, 'design-1-decisions.json'), JSON.stringify({ decisions: [] }));
+
+    // `collectSections` resolves the run directory in-process, so it reads this suite's data
+    // root only if the environment says so — every other test here drives the CLI as a subprocess.
+    const { collectSections } = await import('../scripts/lib/review-pack.mjs');
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = RDATA;
+    const saved = process.cwd();
+    const sections = collectSections(REPO, RRUN, 'implementation-1');
+    process.chdir(saved);
+    if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT; else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+    const body = sections.find((s) => s.title.startsWith('WORK PACKAGE REPORTS')).body;
+
+    assert.equal((body.match(/^### WP-001 /gm) ?? []).length, 1, 'one block per work package');
+    assert.match(body, /SECOND-ATTEMPT/, 'and it is the latest attempt');
+    assert.doesNotMatch(body, /FIRST-ATTEMPT/, 'superseded attempts are not context');
+    assert.doesNotMatch(body, /UNVALIDATED-DRAFT/, 'a report the validator never accepted is not evidence');
+    assert.doesNotMatch(body, /decisions\.json/, 'an adjudication ledger is not a work-package report');
+  });
+
+  /**
+   * §Q12 — the diff is the artefact under review, and it was the first thing dropped.
+   *
+   * At priority 1 `renderPack` drops rather than truncates, and `mandatoryGaps` only ran for
+   * targeted rounds. Simulated on a 120-file change: 600 kB of diff dropped, nothing marked
+   * mandatory, nothing failed — a general implementation round would have returned a verdict
+   * having seen the file list, the statistics and the evidence matrix, and no code.
+   */
+  test('the working-tree diff is mandatory, cut on file boundaries, and says where the rest is', async () => {
+    fs.writeFileSync(path.join(RDIR, 'plan.md'), '# Plan\n\n- WP-001 owns src/a.py, proves AC-1\n');
+    // `collectSections` resolves the run directory in-process, so it reads this suite's data
+    // root only if the environment says so — every other test here drives the CLI as a subprocess.
+    const { collectSections } = await import('../scripts/lib/review-pack.mjs');
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = RDATA;
+    const saved = process.cwd();
+    const sections = collectSections(REPO, RRUN, 'implementation-1');
+    process.chdir(saved);
+    if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT; else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+    const diff = sections.find((s) => s.title === 'WORKING TREE DIFF');
+    assert.equal(diff.priority, 0, 'the subject of the review is never dropped for space');
+    assert.equal(diff.mandatory, true);
+    assert.equal(diff.boundary, 'diff --git ', 'a diff may only be cut between files');
+    assert.match(diff.recover, /git diff HEAD/, 'and must state the command that yields the rest');
+    assert.match(diff.recover, /:\(exclude\)/, 'with the same exclusions, or it reintroduces the false positive');
+    const plan = sections.find((s) => s.title === 'LOCKED PLAN');
+    assert.ok(plan.priority < 3, 'the plan is what fidelity is checked against');
+    assert.ok(plan.recover, 'and is readable on disk when it does not fit');
   });
 });
 
@@ -1519,5 +1597,571 @@ describe('§Q8 — the director tier is checked before the run starts, not after
       // and preflight remain as the later checks.
       assert.equal(transition(proj, 'R1', 'INTAKE', { actor: 'fable' }).phase, 'INTAKE');
     });
+  });
+});
+
+/**
+ * §Q11 — a `§Xn` citation must resolve, or the evidence it points at does not exist.
+ *
+ * Six fixes shipped citing ledger entries nobody had written: the tests said "§Q3 — the
+ * contradictor's sandbox is not the project's to choose" and §Q3 was nowhere in the ledger. The
+ * citation is the whole mechanism by which a defect stays explained after everyone forgets it, and
+ * an unresolvable one reads exactly like a resolvable one. A seventh, in a comment written the same
+ * week, pointed the resolver-rebinding guard at the wrong entry entirely.
+ */
+describe('§Q11 — every ledger citation resolves', () => {
+  test('no source or document cites a section the ledger does not define', () => {
+    const ledger = fs.readFileSync(path.join(ROOT, 'docs', 'validation-ledger.md'), 'utf8');
+    const defined = new Set();
+    // Entries are headings (`### O9. …`) or table rows (`| L6 | … |`); both are definitions.
+    for (const m of ledger.matchAll(/^#{2,4}\s+([A-Z]\d+)[.–-]/gm)) defined.add(m[1]);
+    for (const m of ledger.matchAll(/^\|\s*([A-Z]\d+)\s*\|/gm)) defined.add(m[1]);
+
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        const p = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(p);
+        else if (/\.(md|mjs)$/.test(entry.name)) files.push(p);
+      }
+    };
+    walk(ROOT);
+
+    const dangling = new Set();
+    for (const file of files) {
+      // `§13.11` and friends cite the French spec by number; only lettered ids are ledger entries.
+      for (const m of fs.readFileSync(file, 'utf8').matchAll(/§([A-Z]\d+)/g)) {
+        if (!defined.has(m[1])) dangling.add(`${path.relative(ROOT, file)}: §${m[1]}`);
+      }
+    }
+    assert.deepEqual([...dangling], [], 'every §Xn citation must resolve to a ledger entry');
+  });
+});
+
+/**
+ * §Q12 — a review pack that cannot carry its subject must say so, not proceed without it.
+ *
+ * The first production run's pack dropped the locked plan and design. Simulating the size the
+ * tool is actually used at — a 120-file change — showed the failure one step worse: the
+ * **working-tree diff itself** was dropped, `droppedMandatory` was empty because nothing marked
+ * it mandatory, and a general round would have returned a verdict on the file list and the
+ * evidence matrix alone. `mandatoryGaps` covered targeted rounds only.
+ */
+describe('§Q12 — the artefact under review survives a change too large for the pack', () => {
+  const diffOf = (files, bytesEach) => Array.from({ length: files }, (_, i) =>
+    `diff --git a/f${i}.py b/f${i}.py\n@@ -1 +1 @@\n-old\n+${'x'.repeat(bytesEach)}\n`).join('');
+
+  const bigPack = (extra = {}) => renderPack([
+    { title: 'CHANGED FILES', body: 'x'.repeat(8_000), priority: 0, mandatory: false },
+    {
+      title: 'WORKING TREE DIFF', body: diffOf(120, 5_000), priority: 0, mandatory: true,
+      boundary: 'diff --git ', recover: 'run `git diff HEAD` in /repo', ...extra,
+    },
+    { title: 'WORK PACKAGE REPORTS', body: 'r'.repeat(200_000), priority: 1, mandatory: false },
+    { title: 'LOCKED PLAN', body: 'p'.repeat(40_000), priority: 1, mandatory: false, recover: '/run/plan.md' },
+  ], 180_000);
+
+  test('the diff is truncated rather than dropped, and no hunk is cut in half', () => {
+    const pack = bigPack();
+    assert.ok(!pack.dropped.includes('WORKING TREE DIFF'), 'the subject of the review is never dropped');
+    assert.ok(pack.truncated.includes('WORKING TREE DIFF'), 'it is truncated instead');
+    const body = pack.text.split('WORKING TREE DIFF')[2] ?? pack.text;
+    const shown = body.slice(0, body.indexOf('[TRUNCATED'));
+    // Every `diff --git` that made it in is followed by its own hunk: the cut lands between
+    // files, never inside one, so nothing the reviewer reads is a fragment of something else.
+    assert.equal(shown.split('diff --git ').length - 1, (shown.match(/@@ /g) ?? []).length,
+      'each file shown carries its hunk');
+  });
+
+  test('the coverage warning names where the missing content can be read', () => {
+    const pack = bigPack();
+    assert.match(pack.text, /read-only filesystem access/i, 'the reviewer is told it may go and look');
+    assert.match(pack.text, /git diff HEAD/, 'the truncated diff states the command that yields the rest');
+    if (pack.dropped.includes('LOCKED PLAN')) assert.match(pack.text, /\/run\/plan\.md/);
+  });
+
+  test('a mandatory section truncated with a source is tolerated; without one it is a gap', () => {
+    assert.deepEqual(bigPack().truncatedMandatoryWithoutRecovery, [],
+      'a diff too large for any pack is the normal case on a large change, not a failure');
+    assert.deepEqual(bigPack({ recover: null }).truncatedMandatoryWithoutRecovery, ['WORKING TREE DIFF'],
+      'but truncated with nowhere to go is exactly the gap the adapter must refuse');
+  });
+});
+
+/**
+ * §Q12 — no single section may starve the ones it is meant to be checked against.
+ *
+ * With the diff correctly promoted to priority 0 it took the whole budget instead: rebuilt
+ * against the real production run at 29 files, 145 kB of diff left nothing for the locked plan,
+ * the work-package reports or the evidence matrix. Two rules fix it together — a share cap on the
+ * one section that grows without bound, and truncation for anything that can be cut on a safe
+ * boundary and says where the rest is. The greedy skip had left 47 kB of budget unspent while
+ * dropping a 48 kB section whole.
+ */
+describe('§Q12 — the budget is shared, not claimed first-come', () => {
+  const diff = Array.from({ length: 60 }, (_, i) =>
+    `diff --git a/f${i}.py b/f${i}.py\n@@ -1 +1 @@\n-old\n+${'x'.repeat(4_000)}\n`).join('');
+  const reports = Array.from({ length: 8 }, (_, i) =>
+    `### WP-00${i} — success (implementer)\n${'r'.repeat(12_000)}`).join('\n\n');
+
+  const build = (overrides = {}) => renderPack([
+    {
+      title: 'WORKING TREE DIFF', body: diff, priority: 0, mandatory: true,
+      boundary: 'diff --git ', recover: 'run `git diff HEAD`', maxShare: 0.5, ...overrides,
+    },
+    { title: 'LOCKED PLAN', body: 'p'.repeat(20_000), priority: 1, mandatory: false, recover: '/run/plan.md' },
+    {
+      title: 'WORK PACKAGE REPORTS', body: reports, priority: 2, mandatory: false,
+      boundary: '### ', recover: '/run/reports',
+    },
+  ], 180_000);
+
+  test('the unbounded section cannot take more than its share', () => {
+    const pack = build();
+    const shown = pack.text.split('[TRUNCATED')[0];
+    assert.ok(Buffer.byteLength(shown) <= 90_000 + 2_048, 'the diff is held to half the budget');
+    assert.ok(pack.text.includes('\nLOCKED PLAN\n'), 'so the contract it is checked against still fits');
+  });
+
+  test('a section that can be cut safely is truncated, not dropped whole', () => {
+    const pack = build();
+    assert.ok(!pack.dropped.includes('WORK PACKAGE REPORTS'), 'skipping it wasted budget it could have used');
+    assert.ok(pack.truncated.includes('WORK PACKAGE REPORTS'));
+    const blocks = (pack.text.match(/^### WP-00\d — /gm) ?? []).length;
+    assert.ok(blocks > 0 && blocks < 8, `some reports shown whole, the rest named: got ${blocks}`);
+    assert.ok(pack.bytes > 170_000, `the budget is used, not skipped past: ${pack.bytes}`);
+  });
+
+  test('a section with no safe cut is still dropped rather than mangled', () => {
+    // The plan is prose: there is no boundary at which half of it is honest, so it is all or
+    // nothing — and when it is nothing, the warning carries its path.
+    const pack = renderPack([
+      { title: 'WORKING TREE DIFF', body: diff, priority: 0, mandatory: true, boundary: 'diff --git ', recover: 'cmd' },
+      { title: 'LOCKED PLAN', body: 'p'.repeat(200_000), priority: 1, mandatory: false, recover: '/run/plan.md' },
+    ], 180_000);
+    assert.ok(pack.dropped.includes('LOCKED PLAN'));
+    assert.match(pack.text, /LOCKED PLAN — read it at: \/run\/plan\.md/);
+  });
+});
+
+/**
+ * §Q13 — a work package too large for one agent's turn budget fails quietly.
+ *
+ * Measured across six packages of the first production run: 3, 4, 5 and 5 owned files finished in
+ * 37–40 turns against a cap of 40, and a 9-file package exhausted a 40-turn implementer *and* a
+ * 50-turn retry — the coordinator wrote the rest itself, which is a documented circuit-breaker
+ * path entered for a reason nobody chose. Nothing failed; the run simply cost more and lost two
+ * agents' accounts of their own work. The plan review prompt already carried "a task too large to
+ * review as one unit will be accepted without being understood" and did not catch it.
+ */
+describe('§Q13 — the plan gate refuses a package no agent can finish', () => {
+  const pkg = (id, files) => ({
+    id,
+    objective: `do ${id}`,
+    scope: { files, owned_files: files },
+    interfaces: 'described',
+    constraints: [],
+    verification: { commands: ['pytest'] },
+    acceptance_criteria: ['AC-1'],
+    out_of_scope: [],
+    report_format: 'json',
+  });
+
+  const gate = (files) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-size-'));
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    const run = JSON.parse(execFileSync('node', [
+      path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's1',
+    ], { encoding: 'utf8', env }));
+    fs.writeFileSync(run.artifacts.plan, `# Plan\n${'x'.repeat(300)}`);
+    fs.writeFileSync(run.artifacts.design, '# Design\n\n- AC-1: it works\n');
+    fs.writeFileSync(run.artifacts.tasks, JSON.stringify({ tasks: [pkg('WP-001', files)] }));
+    const res = spawnSync('node', [
+      path.join(ROOT, 'scripts', 'verify-completion.mjs'), '--project', proj, '--run', run.runId, '--gate', 'plan',
+    ], { encoding: 'utf8', env });
+    const out = JSON.parse(res.stdout);
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    return out.conditions.find((c) => c.id === 'tasks-sized');
+  };
+
+  test('a package at the observed-successful size passes', () => {
+    const c = gate(['a.py', 'b.py', 'c.py', 'd.py', 'e.py']);
+    assert.equal(c.status, 'pass', c.detail);
+  });
+
+  test('the size that exhausted two agents is refused, and the refusal says what to do', () => {
+    const c = gate(Array.from({ length: 9 }, (_, i) => `f${i}.py`));
+    assert.equal(c.status, 'fail');
+    assert.match(c.detail, /WP-001 owns 9/);
+    assert.match(c.detail, /split it, or raise budgets\.maxFilesPerWorkPackage/);
+  });
+});
+
+/**
+ * §Q14 — a rejected report was discarded, and with it everything the agent had observed.
+ *
+ * The agent had already spent its turn budget by the time it submitted, so "fix it and resubmit"
+ * was not available to it: the work stood, its account of itself did not, and the coordinator
+ * re-ran the whole verification to rebuild it. Six of six narratives were lost this way or to a
+ * turn cap in the first production run, which is why §13.5 came out unverifiable.
+ */
+describe('§Q14 — a refused report is kept, and is not mistaken for a valid one', () => {
+  let TMP; let PROJ; let RUN; let RD; let ENV;
+
+  before(() => {
+    TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-reject-'));
+    PROJ = path.join(TMP, 'proj');
+    fs.mkdirSync(PROJ, { recursive: true });
+    ENV = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(TMP, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    const init = JSON.parse(execFileSync('node', [
+      path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', PROJ, 'init', '--session', 's-rej',
+    ], { encoding: 'utf8', env: ENV }));
+    RUN = init.runId;
+    RD = init.runDir;
+  });
+
+  after(() => {
+    try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  test('the submitted content survives the rejection, with the reasons beside it', () => {
+    // `evidence` as an object rather than a string array — the exact shape a live implementer sent.
+    const bad = {
+      work_package_id: 'WP-001', agent: 'sonnet-implementer', status: 'success', attempt: 1,
+      files_read: [], files_modified: [], commands_run: ['pytest -q'],
+      results: [{ check: 'suite', expected: 'green', observed: '20 passed in 20.90s', passed: true }],
+      unverified: [], risks: [], evidence: { note: 'AN OBJECT WHERE AN ARRAY BELONGS' },
+      recommendation: 'accept',
+    };
+    const file = path.join(RD, 'submitted.json');
+    fs.writeFileSync(file, JSON.stringify(bad));
+    const res = spawnSync('node', [
+      path.join(ROOT, 'scripts', 'validate-agent-report.mjs'), 'submit',
+      '--project', PROJ, '--run', RUN, '--file', file,
+    ], { encoding: 'utf8', env: ENV });
+
+    assert.equal(res.status, 7, 'the report is still refused');
+    const kept = path.join(RD, 'reports', 'rejected', 'WP-001-attempt1-r1.json');
+    assert.ok(fs.existsSync(kept), `the refused report must be kept: ${res.stderr}`);
+    const stored = JSON.parse(fs.readFileSync(kept, 'utf8'));
+    assert.equal(stored.submitted.results[0].observed, '20 passed in 20.90s',
+      'what the agent observed is the whole reason to keep it');
+    assert.ok(stored.errors.length, 'and why it was refused, so nobody re-derives that either');
+    assert.match(res.stderr, /kept at .*rejected/, 'the agent is told where it went');
+  });
+
+  test('and the review pack never hands a refused report to the contradictor', async () => {
+    const { collectSections } = await import('../scripts/lib/review-pack.mjs');
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = path.join(TMP, 'data');
+    const saved = process.cwd();
+    const sections = collectSections(PROJ, RUN, 'implementation-1');
+    process.chdir(saved);
+    if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT;
+    else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+
+    const reports = sections.find((s) => s.title.startsWith('WORK PACKAGE REPORTS'));
+    assert.doesNotMatch(JSON.stringify(reports ?? {}), /AN OBJECT WHERE AN ARRAY BELONGS/,
+      'a refused report presented as context would be the run vouching for what it rejected');
+  });
+});
+
+/**
+ * §Q14 — the validator crashed on the shape it exists to refuse.
+ *
+ * `semanticChecks` opens by stating that nothing about a report's shape may be assumed, because
+ * it runs on reports that already failed schema validation — and then four lines later called
+ * `.some` on `report.evidence`. `x ?? []` defends against null and undefined, not against an
+ * object, which is exactly what a live implementer submitted: the agent received a Node stack
+ * trace and exit 1 instead of "evidence must be an array", and its report was lost.
+ */
+describe('§Q14 — a wrongly-typed field is refused, never a crash', () => {
+  const ARRAY_FIELDS = ['files_read', 'files_modified', 'commands_run', 'results', 'unverified', 'risks', 'evidence', 'out_of_scope_changes'];
+
+  const submit = (mutate) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-shape-'));
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    const init = JSON.parse(execFileSync('node', [
+      path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's',
+    ], { encoding: 'utf8', env }));
+    const report = {
+      work_package_id: 'WP-001', agent: 'sonnet-implementer', status: 'success', attempt: 1,
+      files_read: ['a.py'], files_modified: ['a.py'], commands_run: ['pytest'],
+      results: [{ check: 'c', expected: 'e', observed: 'o', passed: true }],
+      unverified: ['nothing'], risks: [], evidence: ['a.py:1 changed'], recommendation: 'accept',
+    };
+    mutate(report);
+    const file = path.join(init.runDir, 'r.json');
+    fs.writeFileSync(file, JSON.stringify(report));
+    const res = spawnSync('node', [
+      path.join(ROOT, 'scripts', 'validate-agent-report.mjs'), 'submit',
+      '--project', proj, '--run', init.runId, '--file', file,
+    ], { encoding: 'utf8', env });
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    return res;
+  };
+
+  for (const field of ARRAY_FIELDS) {
+    test(`an object where ${field} should be an array is refused, not fatal`, () => {
+      const res = submit((r) => { r[field] = { wrong: 'shape' }; });
+      assert.doesNotMatch(res.stderr, /ReferenceError|TypeError|at semanticChecks|at ownershipChecks/,
+        `the validator crashed instead of refusing:\n${res.stderr.slice(0, 400)}`);
+      assert.equal(res.status, 7, 'a malformed report is a rejection, with a code an agent can act on');
+    });
+  }
+
+  test('a malformed tasks file cannot crash the ownership check either', () => {
+    const res = submit((r) => { r.files_modified = { a: 1 }; r.out_of_scope_changes = { b: 2 }; });
+    assert.doesNotMatch(res.stderr, /TypeError|ReferenceError/);
+    assert.equal(res.status, 7);
+  });
+});
+
+/**
+ * §Q12 — the two defects the fix itself introduced or left open.
+ *
+ * Deduplicating reports on the work-package id alone kept the wrong record: `sort()` orders
+ * `WP-001-attempt1.json` before `WP-001.json`, so the unvalidated draft an agent left at the path
+ * its prompt named overwrote the copy the validator stored. And a mandatory section can be
+ * "present" while carrying nothing: `gitRead` yields a forty-byte "(git diff … unavailable)" when
+ * git fails, which fits any budget and satisfies the size check the fix had just tightened.
+ */
+describe('§Q12 — presence is not the same as content', () => {
+  test('an unreadable mandatory source is a gap, not a small section', () => {
+    const pack = renderPack([
+      { title: 'WORKING TREE DIFF', body: '(git diff HEAD unavailable)', priority: 0, mandatory: true, unavailable: true },
+      { title: 'LOCKED PLAN', body: 'p'.repeat(1_000), priority: 1, mandatory: false },
+    ], 180_000);
+    assert.deepEqual(pack.dropped, [], 'it is present — that was the whole trap');
+    assert.deepEqual(pack.droppedMandatory, []);
+    assert.deepEqual(pack.unavailableMandatory, ['WORKING TREE DIFF'],
+      'and it is still a gap, because the reviewer would see no code');
+  });
+
+  test('a readable section is never reported unavailable', () => {
+    const pack = renderPack([
+      { title: 'WORKING TREE DIFF', body: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n', priority: 0, mandatory: true },
+    ], 180_000);
+    assert.deepEqual(pack.unavailableMandatory, []);
+  });
+});
+
+/**
+ * §Q12 — the large-diff path was unreachable, because collection failed before rendering.
+ *
+ * `gitTry` defaults to a 400 kB `maxBuffer`, and the diff collector used that default. In a real
+ * repository a 535 kB file change produces a 561 kB diff and `execFileSync` returns nothing: the
+ * section was marked unavailable and the round hard-failed. Everything built for that size —
+ * boundary-aware truncation, the share cap, the recovery command — sat behind a door that never
+ * opened. The synthetic 600 kB test injected its diff straight into the renderer and so proved
+ * nothing about the collector.
+ */
+describe('§Q12 — a diff larger than the old collector limit is actually collected', () => {
+  let REPO;
+
+  before(() => {
+    REPO = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-bigdiff-'));
+    const git = (...args) => execFileSync('git', args, { cwd: REPO, encoding: 'utf8' });
+    git('init', '-q', '.');
+    fs.writeFileSync(path.join(REPO, 'big.txt'), 'seed\n');
+    git('add', '-A');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init');
+    // Comfortably past the 400 kB default, and past it as one file so no per-file boundary saves it.
+    fs.writeFileSync(path.join(REPO, 'big.txt'),
+      Array.from({ length: 26_000 }, (_, i) => `line ${i}${' '.repeat(10)}`).join('\n'));
+  });
+
+  after(() => {
+    try { fs.rmSync(REPO, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  test('the collector returns the diff instead of nothing', async () => {
+    const { gitTry } = await import('../scripts/lib/review-pack.mjs');
+    const atOldDefault = gitTry(REPO, ['diff', 'HEAD']);
+    assert.equal(atOldDefault, null, 'the fixture must exceed the old default, or it proves nothing');
+    const collected = gitTry(REPO, ['diff', 'HEAD'], { maxBytes: 16 * 1024 * 1024 });
+    assert.ok(collected && collected.length > 400_000, `expected a large diff, got ${collected?.length ?? 'null'}`);
+  });
+
+  test('and the section that reaches the renderer is truncated, not unavailable', async () => {
+    const { collectSections, renderPack } = await import('../scripts/lib/review-pack.mjs');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-bigrun-'));
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = path.join(tmp, 'data');
+    const init = JSON.parse(execFileSync('node', [
+      path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', REPO, 'init', '--session', 's-big',
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } }));
+    const saved = process.cwd();
+    const sections = collectSections(REPO, init.runId, 'implementation-1');
+    process.chdir(saved);
+    if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT;
+    else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+
+    const diff = sections.find((s) => s.title === 'WORKING TREE DIFF');
+    assert.equal(diff.unavailable, false, 'the collector must have succeeded');
+    const pack = renderPack(sections, 180_000);
+    assert.deepEqual(pack.unavailableMandatory, [], 'so this is no longer a gap');
+    assert.ok(pack.truncated.includes('WORKING TREE DIFF'), 'it is bounded by the renderer, as designed');
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+});
+
+/**
+ * §Q15 — a completion verdict must be about the thing it judged.
+ *
+ * The digest hashed identifiers and statuses only, so a verdict survived every change to the
+ * substance it was a verdict about. Reproduced against a completed fixture: rewriting the
+ * implementation to broken code, replacing an evidence proof with a fabrication, swapping the
+ * command that proof claims to have run, and editing the run's budget all left it byte-identical.
+ * Per gate rather than global, because a single digest over everything refused a legitimate
+ * `DESIGN_LOCK → PLAN_DRAFT`: writing `tasks.json` invalidated a design verdict that never read it.
+ */
+describe('§Q15 — the completion digest binds to substance, not to labels', () => {
+  const build = () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-digest-'));
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    const git = (...args) => execFileSync('git', args, { cwd: proj, encoding: 'utf8' });
+    git('init', '-q', '.');
+    fs.writeFileSync(path.join(proj, 'app.py'), 'def add(a, b):\n    return a + b\n');
+    git('add', '-A');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init');
+    fs.writeFileSync(path.join(proj, 'app.py'), 'def add(a, b):\n    return a + b  # changed\n');
+
+    const init = JSON.parse(execFileSync('node', [
+      path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's-dg',
+    ], { encoding: 'utf8', env }));
+    fs.writeFileSync(init.artifacts.evidence, JSON.stringify({
+      criteria: [{ id: 'AC-1', status: 'satisfied', evidence: ['pytest -q → 3 passed'] }],
+      checks: [{ name: 'suite', command: 'pytest -q', status: 'pass' }],
+    }, null, 2));
+    return { tmp, proj, env, runId: init.runId, artifacts: init.artifacts };
+  };
+
+  const digestOf = async (fixture) => {
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = fixture.env.HYPERPOWERS_DATA_ROOT;
+    const { loadState, gateInputDigest } = await import('../scripts/lib/state.mjs');
+    const d = gateInputDigest(fixture.proj, fixture.runId, loadState(fixture.proj, fixture.runId), 'completion');
+    if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT;
+    else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+    return d;
+  };
+
+  const mutations = {
+    'the implementation itself': (f) => fs.writeFileSync(path.join(f.proj, 'app.py'), 'def add(a, b):\n    return a - b\n'),
+    'an evidence proof rewritten to a fabrication': (f) => {
+      const e = JSON.parse(fs.readFileSync(f.artifacts.evidence, 'utf8'));
+      e.criteria[0].evidence = ['pytest -q → 900 passed'];
+      fs.writeFileSync(f.artifacts.evidence, JSON.stringify(e, null, 2));
+    },
+    'the command a proof claims to have run': (f) => {
+      const e = JSON.parse(fs.readFileSync(f.artifacts.evidence, 'utf8'));
+      e.checks[0].command = 'echo pretend';
+      fs.writeFileSync(f.artifacts.evidence, JSON.stringify(e, null, 2));
+    },
+    'the effective budget configuration': (f) => fs.writeFileSync(
+      path.join(f.proj, '.hyperpowers.json'), JSON.stringify({ budgets: { maxCostUsd: 9999 } })),
+  };
+
+  for (const [what, mutate] of Object.entries(mutations)) {
+    test(`changing ${what} invalidates the verdict`, async () => {
+      const f = build();
+      try {
+        const before = await digestOf(f);
+        mutate(f);
+        const after = await digestOf(f);
+        assert.notEqual(after, before, `${what} left the digest unchanged`);
+      } finally {
+        try { fs.rmSync(f.tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+  }
+
+  test('a design verdict is not invalidated by work that comes after it', async () => {
+    // The over-binding failure, kept as a test because it is the one that makes a check credible:
+    // a gate refusing on inputs it never read is a gate people learn to route around.
+    const f = build();
+    try {
+      const { loadState, gateInputDigest } = await import('../scripts/lib/state.mjs');
+      const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+      process.env.HYPERPOWERS_DATA_ROOT = f.env.HYPERPOWERS_DATA_ROOT;
+      const before = gateInputDigest(f.proj, f.runId, loadState(f.proj, f.runId), 'design');
+      fs.writeFileSync(f.artifacts.tasks, JSON.stringify({ tasks: [{ id: 'WP-001', status: 'pending' }] }));
+      fs.writeFileSync(path.join(f.proj, 'app.py'), 'def add(a, b):\n    return a * b\n');
+      const after = gateInputDigest(f.proj, f.runId, loadState(f.proj, f.runId), 'design');
+      if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT;
+      else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+      assert.equal(after, before, 'the design gate reads neither tasks.json nor the working tree');
+    } finally {
+      try { fs.rmSync(f.tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+});
+
+/**
+ * §Q15 — the two gaps found while checking the fix for §Q15.
+ *
+ * The per-gate digest first matched review rounds against a fixed list, which excluded the §18
+ * extra round — sanctioned only *after* a round-2 blocker, so a named list would have been blind
+ * at precisely the moment a run is in trouble. And numeric validation covered `budgets`,
+ * `concurrency` and `stop` but not `codex`, where a mistyped `reviewPackMaxBytes` makes every
+ * budget comparison `NaN`-false and the pack drops every section: a config typo emptying the
+ * reviewer's context.
+ */
+describe('§Q15 — the extra round counts, and a mistyped pack budget cannot empty the pack', () => {
+  test('a design-extra review invalidates the design verdict', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-extra-'));
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj, { recursive: true });
+    const savedEnv = process.env.HYPERPOWERS_DATA_ROOT;
+    process.env.HYPERPOWERS_DATA_ROOT = path.join(tmp, 'data');
+    try {
+      const init = JSON.parse(execFileSync('node', [
+        path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's-x',
+      ], { encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT } }));
+      const { loadState, gateInputDigest, mutateState } = await import('../scripts/lib/state.mjs');
+
+      const before = gateInputDigest(proj, init.runId, loadState(proj, init.runId), 'design');
+      mutateState(proj, init.runId, (s) => { s.reviews = { 'design-extra': { verdict: 'blocker' } }; });
+      const after = gateInputDigest(proj, init.runId, loadState(proj, init.runId), 'design');
+      assert.notEqual(after, before, 'the one round that only runs after a blocker must not be invisible');
+
+      // And still nothing to do with another artefact's rounds.
+      const plainBefore = gateInputDigest(proj, init.runId, loadState(proj, init.runId), 'plan');
+      mutateState(proj, init.runId, (s) => { s.reviews = { ...s.reviews, 'design-2': { verdict: 'clean' } }; });
+      const plainAfter = gateInputDigest(proj, init.runId, loadState(proj, init.runId), 'plan');
+      assert.equal(plainAfter, plainBefore, 'a design round is not the plan gate’s business');
+    } finally {
+      if (savedEnv === undefined) delete process.env.HYPERPOWERS_DATA_ROOT;
+      else process.env.HYPERPOWERS_DATA_ROOT = savedEnv;
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  test('a non-numeric review-pack budget falls back instead of emptying the pack', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-cfgtype-'));
+    fs.writeFileSync(path.join(tmp, '.hyperpowers.json'),
+      JSON.stringify({ codex: { reviewPackMaxBytes: 'big', timeoutMs: null } }));
+    const { loadConfig, DEFAULTS } = await import('../scripts/lib/config.mjs');
+    const cfg = loadConfig(tmp);
+    assert.equal(cfg.codex.reviewPackMaxBytes, DEFAULTS.codex.reviewPackMaxBytes);
+    assert.equal(cfg.codex.timeoutMs, DEFAULTS.codex.timeoutMs);
+    assert.ok((cfg.rejectedOverrides ?? []).some((r) => r.includes('codex.reviewPackMaxBytes')),
+      'a refused override is reported, never silently applied');
+
+    // Why it matters: the value reaches renderPack as its budget.
+    const { renderPack } = await import('../scripts/lib/review-pack.mjs');
+    const sections = [{ title: 'WORKING TREE DIFF', body: 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n', priority: 0, mandatory: true }];
+    assert.equal(renderPack(sections, Number.NaN).dropped.length, 1,
+      'NaN really does drop everything — which is what the type check prevents reaching');
+    assert.equal(renderPack(sections, cfg.codex.reviewPackMaxBytes).dropped.length, 0);
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 });

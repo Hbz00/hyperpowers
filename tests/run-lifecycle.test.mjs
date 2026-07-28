@@ -185,6 +185,17 @@ describe('a run reaches COMPLETE through documented commands only', () => {
     }]));
     ledger(['record', '--round', 'design-1', '--file', resolved]);
     ledger(['resolve', '--round', 'design-1', '--finding', 'DESIGN-001', '--evidence', 'design.md states the rolling 60-second boundary.']);
+
+    // The design verdict was given before all of this. Escalating the finding and then deciding it
+    // differently changed exactly what that verdict was about, so it no longer applies and the run
+    // may not leave DESIGN_LOCK on it. Re-running the gate is what the refusal tells you to do,
+    // and it is a command an agent is told to run — which is the only kind this file may use.
+    //
+    // This sequence used to pass without re-running anything: the digest hashed
+    // `finding_id:decision:resolved`, the triple came back to its original value, and a rationale
+    // rewritten from "not mine to decide" to "Fable approved tightening the boundary" was
+    // invisible to it. The blindness was demonstrable inside this very test.
+    assert.equal(JSON.parse(gate('design').stdout).complete, true, 'the re-run gate passes on the restored state');
   });
 
   test('plan review and lock', () => {
@@ -262,8 +273,21 @@ describe('a run reaches COMPLETE through documented commands only', () => {
     assert.equal(final.complete, true, JSON.stringify(final.conditions.filter((c) => c.status === 'fail'), null, 2));
 
     run('report.mjs', ['final', '--project', PROJECT, '--run', RUN]);
+    // Written while the run is still in FINAL_ACCEPTANCE, because the phase table requires the
+    // report before it will let the run leave. So the document says what it must at this instant.
+    const beforeTerminal = fs.readFileSync(path.join(RUNDIR, 'final-report.md'), 'utf8');
+    assert.match(beforeTerminal, /\*\*Outcome:\*\* FINAL_ACCEPTANCE/, 'the artefact starts out non-terminal');
+
     assert.equal(go('COMPLETE'), 'COMPLETE');
     assert.equal(phase(), 'COMPLETE');
+
+    // And the transition regenerates it. The production run delivered a report headed
+    // "Outcome: FINAL_ACCEPTANCE (not terminal yet — regenerate this report after the final
+    // transition)" for a run that had reached COMPLETE: the instruction to regenerate existed,
+    // and an instruction is not a mechanism.
+    const delivered = fs.readFileSync(path.join(RUNDIR, 'final-report.md'), 'utf8');
+    assert.match(delivered, /\*\*Outcome:\*\* COMPLETE/, 'the delivered report states the outcome it reached');
+    assert.doesNotMatch(delivered, /not terminal yet/, 'and carries no instruction nobody will run');
   });
 
   test('a blocked policy attempt does not make COMPLETE unreachable', () => {

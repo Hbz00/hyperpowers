@@ -617,7 +617,7 @@ the director tier is not the configured model.
 ADR-0001 now rests on the shipped configuration, not an analogue.
 
 ### J7. Test suite — **all passing**
-`npm test`: 293 Git-policy conformance cases, state-machine and hook integration tests (driving
+`npm test`: 306 Git-policy conformance cases, state-machine and hook integration tests (driving
 the real scripts as subprocesses with real hook payloads), gate-reachability tests, an
 end-to-end run-lifecycle walk, and schema/validator tests. `npm run docs:check` verifies the
 generated workflow reference matches the state machine.
@@ -1242,6 +1242,10 @@ without evidence; one five-line utility spends 103% of it. Either the default is
 work or the scaffolding is disproportionate for small work — §O7's cost table argues the second —
 but nobody could have known before a run was measured.
 
+Raised to **100** once four runs had been measured: $14, $22, $23 on toy benches and **$73.20** on
+the production feature (§Q11). A default that halts the only run shape the tool is *for* is not a
+circuit breaker, it is a defect with a configuration key.
+
 ### O15. Why Opus cost four times Sonnet — diagnosed, and fixed where it was decidable
 
 The measured inversion, with the intent beside it:
@@ -1695,6 +1699,21 @@ Fixed by making the skill give the command and say what a hand-written report si
 
 ---
 
+### Q1–Q7. The pre-release audit, minus the two that needed their own entry
+
+Six fixes shipped with only a regression test to their name — the tests cite `§Qn`, the ledger
+never carried the row. Recorded here from those tests, so every claim below is falsifiable by
+reading the file named beside it. `§Q5` and `§Q8` have their own entries, below.
+
+| | Defect | Fix | Pinned by |
+| --- | --- | --- | --- |
+| Q1 | The classifier trusted a name in command position even when a shell builtin had just rebound it: `hash -p /usr/bin/touch git; git status` ran `touch` and was reported as an approved read | `hash`, `enable`, `alias` and `autoload` deny a rebinding of any validated name — see §Q10 for the false positive this produced and the per-builtin rule that replaced it | `tests/git-policy.test.mjs` |
+| Q2 | Two installations coexisting on one machine (`hyperpowers-hyperpowers`, `hyperpowers-inline`), resolved by **recency**: an empty directory created minutes earlier by `claude plugin install` outranked the one holding every run, and `describeDataRoot()` called it trusted. §O1's failure through a second door | The data root is chosen by installation identity; the marker records which plugin root stamped it, and an ambiguous resolution fails preflight instead of guessing | `tests/regression.test.mjs` |
+| Q3 | `.hyperpowers.json` is deep-merged over the defaults, so a project could set `codex.sandbox: danger-full-access` — turning the independent read-only reviewer into a writer — or repoint `codex.binary`, in a file the review pack excludes as Hyperpowers' own | `codex.sandbox`, `codex.binary` and `git.mode` are immutable; an attempted override is stripped and recorded in `config.rejectedOverrides` | `tests/regression.test.mjs` |
+| Q4 | A passing gate verdict satisfied a transition **after** the run had changed: record a passing completion gate, insert a critical open blocker, and `COMPLETE` was still reachable. "Re-run the verifier first" was a prompt instruction, and an instruction is not an invariant | Each verdict stores a digest of the inputs it judged; a transition rejects a verdict whose digest no longer matches the state | `tests/regression.test.mjs` |
+| Q6 | A gate may pass with an `unverifiable` condition, but stored only a pass/fail — so the toleration existed solely in whatever the director happened to write | The ids are persisted on the gate record and the final report renders them under residual risks | `tests/regression.test.mjs` |
+| Q7 | `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` was required, so preflight refused a run over a setting no run mechanism reads; and `setup.mjs` answered the restart question by guessing | The key is recommended, not required; setup reports `unknown_until_preflight` rather than asserting | `tests/regression.test.mjs` |
+
 ### Q5. The Opus coordinators never invoked a Superpowers skill — measured
 
 Both `opus-plan-coordinator` and `opus-execution-coordinator` said *"Apply `superpowers:writing-plans`"*
@@ -1753,6 +1772,481 @@ Fixed at the two moments it is still cheap:
 One shared reader, `directorTier()`, answers for both — and returns `ok: null` rather than `true`
 when the question could not be asked, because "unobservable" and "agreed" are the distinction this
 whole class of defect keeps blurring.
+
+### Q9. The bootstrap threw away the artefact paths, so the director guessed one — observed live
+
+Observed in the first production run, 2026-07-27, at INTAKE. The director wrote `request.md` to
+`<data-root>/runs/<runId>/request.md`, which does not exist: the real layout is
+`<data-root>/projects/<slug>/runs/<runId>/`. The exit gate refused the transition, the refusal
+named the absolute path it had looked for, and the director recovered with one `mv`. Cost: two
+turns. Nothing was lost, and the gate is the reason.
+
+The cause was in `skills/feature/SKILL.md`, not in the model. `init` emits `runDir` **and the
+absolute path of every artefact the run will write** — precisely so no one has to reconstruct one.
+The documented bootstrap piped that output into `python3` to extract `runId` and discarded the
+rest, so the only layout string left in the director's context came from the preflight check
+`plugin-data-dir`: *"Run data at `<data-root>`"*. It appended the obvious suffix and was wrong.
+
+A field the system writes and nobody reads — the mirror image of §K–§O's recurring defect, and it
+fails the same way: quietly, with a plausible-looking artefact in the wrong place.
+
+Fixed by printing the init payload instead of swallowing it, and by stating in the skill that
+artefact paths are given, never derived. The same edit removed a second, unobserved problem: five
+agent prompts and the bootstrap shelled out to **`python3`** to read one JSON field, in a plugin
+whose stated constraint is zero runtime dependencies. Where `python3` is absent the substitution
+yields an empty string and the agent writes to a path with a hole in it — silent, and untested
+because this machine has `python3`. All six now use `node -pe`, which is guaranteed present:
+the scripts being invoked are Node.
+
+`$RUN` was also a fiction. Shell state does not survive between Bash tool calls, so the `"$RUN"`
+in every later command block would have expanded to nothing; it worked only because agents
+substituted the literal run id. The placeholders now say `<RUN_ID>`, which is what actually happens.
+
+### Q10. The resolver-rebinding guard denied a query — my own regression, found by a production run
+
+Same run, 16:19:46. A researcher probing the environment ran
+
+```
+which docker; docker --version; alias docker 2>/dev/null; type docker
+```
+
+and the `PreToolUse` hook denied it: *"`alias docker` rebinds a name this policy validates"*.
+
+It does not. `alias NAME` with no `=` **prints** the current alias; it cannot bind anything. The
+guard added earlier in this session (§Q1) treated any bare word after a resolver builtin as the
+bound name, which is right for `autoload -Uz git` — where the bare name *is* the attack — and
+wrong for the query forms of the other three. `docker` is protected because it is a remote
+executor (`docker run … git push`), so the denial landed on the most ordinary environment probe
+there is.
+
+The forms were re-checked one at a time, and only some of them bind:
+
+| form | binds? | why |
+| --- | --- | --- |
+| `alias git` | no | prints the alias |
+| `alias git=/usr/bin/touch` | **yes** | measured, §Q1 |
+| `hash git` | no | caches the PATH lookup of the real git |
+| `hash -p /bin/touch git` · `hash git=…` | **yes** | measured, bash and zsh |
+| `enable git` | no | enables a builtin of that name, and there is no `git` builtin |
+| `enable -f lib.so git` | **yes** | documented |
+| `autoload -Uz git` | **yes** | measured — the bare name is the whole attack |
+
+So the rule is per-builtin, not per-token: a bare word binds only for `autoload`, for `hash` with
+`-p`, and for `enable` with `-f`. Combined flags (`hash -lp`, `enable -af`) are matched, and both
+have conformance rows so the exemption cannot be reached by rewriting the flag.
+
+Table: **293 → 300 cases**. Five of the seven are the allowed query forms, including the exact
+command the run was refused; two pin the combined-flag denials.
+
+Two things worth keeping from this. The guard failed in the **safe** direction — a denied probe
+costs a turn, an allowed rebinding costs the repository — and that is why the fail-closed choice
+is right even when it is wrong. And the false positive was found by neither the 293-case table
+nor six rounds of adversarial review, but by an agent doing something mundane on somebody's real
+project. Ordinary use is a test genre the suite cannot imitate.
+
+### Q11. The first production run — four hours, `COMPLETE`, and five defects only real work could find
+
+`radiance`, 200k lines, Django + Docker. Feature: turn `decision_duration_seconds` from a
+simulator-only constant into a measured, GDPR Art. 22-defensible duration.
+
+| | |
+| --- | --- |
+| Outcome | `COMPLETE`, 2026-07-27, **4 h 12 min**, **$73.20** measured |
+| Work | 6 work packages, 14 subagents, 6 Codex rounds, 0 fallbacks, 1 retry |
+| Findings | 12 raised, **10 accepted, 2 rejected** — both rejections upheld by the next round |
+| Gate | 19/24 conditions passed, 0 failed, 2 unverifiable |
+| Diff | 26 files, none outside a work package's declared ownership |
+
+The architecture did what it claims. Round 1 killed a design that promised an Art. 22 attestation
+on a timer between two HTTP requests. Round 3 found that every verification command would have run
+against image-baked code, because `django` has no bind mount and the plan routed `migrate` through
+it. Round 5 found that a re-run guard skips a legitimate row — and Opus rejected the recommended
+fix **by executing it**, showing it fabricates a three-day review window on a row that legitimately
+arrived NULL, which `reporting.py` then averages into handling time. The contradictor's remedy
+would have manufactured exactly the fake metric the feature exists to remove.
+
+Five defects in *this* plugin surfaced, none of which 464 tests or six rounds of self-review had
+found, because each needs an agent doing real work rather than a fixture:
+
+1. **§Q9** — the bootstrap discarded the artefact-path map, so the director guessed a path.
+2. **§Q10** — the resolver-rebinding guard denied `alias docker`, an environment probe.
+3. **Criterion ids in test docstrings.** The prompt forbids plan references in shipped code; the
+   work-package contract enumerates required cases *by criterion id*, and the implementer copied
+   that shape into `"""AC-11: …"""`. Two instructions pulled opposite ways and the more specific
+   one won. Fixed by saying where the id belongs — the contract and the report, never the file.
+4. **Report field shapes were named but not shown.** `evidence` is a string array; the prompt said
+   only that it was required, the implementer sent an object, and the rejected report was **not
+   stored** — the work survived, its account of itself did not. Both WP-001 and WP-005 lost their
+   narrative this way, and the coordinator re-ran the verification to rebuild it.
+5. **Two consumers of a field only a rare hook stamps.** `13.12b-director-model` reported "not
+   observed" and the final report printed "transcript measurement unavailable" — both because
+   `observedUsage` / `observedDirectorModel` are written by the Stop controller, which fired once
+   in an 86-minute run (§O14) and not at all before the gate in a four-hour one. The transcript
+   answers both on demand. Fixed at both sites by asking the shared reader when the stamp is
+   missing.
+
+   The damage was not the total. The fallback estimate read **$70.46** and the transcript at that
+   instant read **$70.461** — the event telemetry was exact. What vanished was the per-tier table,
+   under a heading that still announced *"measured from the session transcript, not estimated"*.
+   A first draft of this entry claimed the estimate was 4% low, by comparing it against a
+   measurement taken after `COMPLETE` and several further director turns. The run trace settled
+   it: at 20:12:30 the two figures agreed to the cent.
+
+Defect 5 is §O14's lesson resurfacing one level up: *a fact checked only where a once-firing hook
+stamps it is not a fact the system knows.* It was already fixed for budgets and for the tier
+invariant; two other consumers still read the stamp.
+
+Two weaknesses recorded and not fixed:
+
+- **The review pack evicts `LOCKED PLAN` and `LOCKED DESIGN` first.** They are priority 3, so on a
+  large diff — exactly when fidelity to the locked plan matters most — the diff crowds out the
+  specification it should be checked against. Honest truncation worked (the omission is announced
+  in the pack, and both implementation reviewers reported reduced coverage), so this cost a clean
+  verdict rather than a silent one. The priority order is still wrong.
+- **RED-phase evidence exists only inside an agent's final report**, and two independent mechanisms
+  destroy that report. Condition §13.5 was therefore `unverifiable`: this run cannot prove its
+  tests failed before the fix. A post-hoc reconstruction cannot recover output nobody captured —
+  the failing run has to be recorded when it happens.
+
+Cost, against the three pilots ($14–$22, 54–57 min to `PLAN_LOCK`): **$73.20 and 4 h 12**, with
+`PLAN_LOCK` at 99 min. Cost still does not track feature size — it tracks findings to adjudicate
+and packages to build.
+
+Measured from the transcript, 656 messages and 574k output tokens against **71.9M cache reads**:
+
+| tier | messages | output | cost | share of cost | design band (output) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| fable | 65 | 54,143 | $19.52 | 26.7% | 0–10% — **9.4%**, within |
+| opus | 255 | 283,418 | $36.62 | 50.0% | 20–25% — **49.4%**, double |
+| sonnet | 334 | 236,507 | $17.06 | 23.3% | 65–100% — **41.2%**, under |
+
+Three things follow, and none of them is a routing problem.
+
+**Context is 81.8% of the bill** — 50.0% cache read, 31.8% cache write, 18.2% generation. §P8 put
+it at two thirds on a shorter run; the longer the run, the harder that ratio tilts, because every
+turn re-reads a context that only grows.
+
+**The two most expensive agents are the two longest-lived.** The director cost **$20.36** for 9.4%
+of the output at a 243:1 read-to-output ratio — the price of holding four hours in one turn — and
+the execution coordinator **$17.02** across 92 turns, which is *more than all six implementers
+combined* ($12.05). The orchestrator outspent the work it orchestrated.
+
+**Adjudication cost twice the drafting it judged.** Three adjudicator instances, 130 turns,
+**$13.11**, against $3.82 for the design coordinator and $2.66 for the plan coordinator. Twelve
+findings are more expensive to decide than a design and a plan are to write.
+
+So the bands describe a run whose cost is dominated by production. This one's is dominated by
+turns and by context, both concentrated in two Opus-tier agents that never end. Moving work to
+Sonnet would not have touched it.
+
+### Q12. The review pack dropped its own subject — found by asking what happens at ten times the size
+
+§Q11 recorded that the implementation pack omitted the locked plan and design, and proposed
+promoting the plan. Simulating that fix first showed it does nothing: at equal priority the stable
+sort places the plan behind the diff and the reports, and 7 293 bytes remain. At the 180 kB cap the
+choice looked like plan **xor** reports.
+
+It was neither. `formatReports` rendered `reports/` verbatim, and that directory holds three
+unrelated things — the file an agent writes at the path its prompt gives it (`WP-001.json`), the
+copy the validator stores (`WP-001-attempt1.json`, `validate-agent-report.mjs:115`), and the
+adjudication ledgers. Measured on the production pack: **13 blocks for 6 work packages**, three of
+them duplicates and three empty ledger headers, **24 143 of 71 888 bytes**. The duplication is what
+evicted the plan. Deduplicating frees more than the plan costs, and nothing else moves.
+
+Then the same question at the size the tool is actually used at. A 120-file change, simulated:
+
+```
+diff 600 kB · reports 200 kB · plan 40 kB · design 120 kB · cap 180 kB
+dropped: WORKING TREE DIFF, WORK PACKAGE REPORTS, LOCKED DESIGN
+droppedMandatory: []          ← nothing failed
+bytes: 123 362                ← the budget was not even filled
+```
+
+**The artefact under review was dropped, not truncated** — `renderPack` truncates priority ≤ 0 and
+the diff sat at 1 — and `mandatoryGaps` ran for targeted rounds only, so a general implementation
+round would have returned a verdict having seen the file list, the statistics and the evidence
+matrix, and no code. The greedy loop skips an oversized section and moves on, which is why 57 kB
+of budget went unused while the subject of the review was absent.
+
+Two capabilities were measured rather than assumed, because the remedy rests on them:
+
+| probe | result |
+| --- | --- |
+| `codex exec --sandbox read-only -C <proj>` reading an absolute path outside the project | **works**, unprompted — it ran `/bin/cat` itself |
+| the same, running `git diff HEAD` in the project | **works** — full diff returned |
+
+So the pack can stop pretending it will ever carry 600 kB. It carries what fits and states where
+the rest is. Fixed together:
+
+- the diff is **priority 0 and mandatory**, cut only on a `diff --git` boundary so no reviewer ever
+  reads half a hunk, and carrying the exact command that yields the rest — **with the same
+  `:(exclude)` pathspecs**, or the recovery instruction would reintroduce the false positive those
+  exclusions exist to stop;
+- explicit priorities, because a stable sort within one level meant array order silently decided
+  what survived: diff `0`, **locked plan `1`**, work-package reports `2`, untracked `3`, design
+  `4`, request `5`. The plan outranks the producers' own reports — it is the contract the code is
+  checked against;
+- a **share cap** on the diff (half the budget). Promoting it to priority 0 without one merely
+  moved the starvation: rebuilt against the real run — the user had since staged the untracked
+  files, taking `git diff HEAD` from 75 kB to **145 kB** — the diff alone consumed everything and
+  the plan, the reports *and* the evidence matrix were all dropped;
+- **truncate whatever can be cut on a safe boundary and says where the rest is; drop only what can
+  be neither.** Tying "may be truncated" to priority left 47 kB of budget unspent while dropping a
+  48 kB section whole. A prose plan has no honest half, so it is still all-or-nothing;
+- the coverage warning lists each missing section *with where to read it*, and says the reviewer
+  has read-only filesystem access;
+- `mandatoryGaps` applies to every round, and distinguishes **dropped** (always a gap) from
+  **truncated with a stated source** (not a gap — otherwise every large feature would block).
+
+Rebuilt against the production run at its current 29-file, 145 kB diff:
+
+```
+before   dropped: LOCKED PLAN, LOCKED DESIGN          13 report blocks for 6 packages
+after    177 930 / 180 000 bytes · dropped: LOCKED DESIGN (path given)
+         diff 15/29 files · plan whole · reports 5/6 · evidence matrix whole · no gap
+```
+
+Four sections that could not coexist now all do, two of them partial and both saying where the
+rest is. The budget goes from 73 % used with the subject absent to 99 % used with nothing silently
+missing.
+
+At the size that motivated all this — a 600 kB diff — the share cap shows roughly **15 % of the
+files** and names the command for the other 85 %. That is the honest ceiling of a 180 kB pack, and
+it is why the recovery instruction is load-bearing rather than decorative.
+
+Two further defects surfaced when this fix was itself reviewed:
+
+- **Deduplicating on the id alone kept the wrong record.** `sort()` orders
+  `WP-001-attempt1.json` before `WP-001.json` (`-` is 0x2D, `.` is 0x2E), so with `>=` the
+  *unvalidated draft* an agent left at the path its prompt named overwrote the copy the validator
+  stored. Verified against the production pack: the surviving block read `WP-001 — complete
+  (implementer)` instead of the stored record that disclosed its own report had been
+  reconstructed. Now keyed on `storedAt`, stamped by the one code path that accepts a report —
+  which is the difference between what the run stands behind and what an agent happened to write.
+- **A mandatory section can be satisfied by a placeholder.** `gitRead` returns "(git diff HEAD
+  unavailable)" when git fails — about forty bytes, so it fits any budget, the section is
+  "present", and the round proceeds having seen no code. The size path was closed while the
+  failure path stayed open. A mandatory section whose source could not be read is now its own
+  category of gap.
+
+The targeted rounds are deliberately **not** given recovery paths. A findings list and an
+adjudication record are small and bounded: one that does not fit means something is badly wrong,
+not merely large, so truncation there still fails the round — which is the §8.7 guarantee.
+
+The general lesson is not about bytes. A bound chosen for one failure mode — spec §23 Risk 5, the
+review that never returns — silently became the definition of what "adversarial review" covers.
+Nothing in the system noticed, because the pack reported reduced coverage and the round ran anyway.
+
+### Q13. The turn budget, not the package size, was the binding constraint — and the reverse was assumed
+
+§Q11 blamed a 9-file work package for two agents being "truncated by the harness". Two of those
+three words were wrong.
+
+**Truncated by what.** The two `Connection closed mid-response` errors in the run hit the *Opus
+execution coordinator*, not the implementers, while it was emitting the WP-005 dispatch prompt at
+155 kB of context. The director recovered by resuming it twice, the second time asking for a
+leaner prompt — visible in its own words at 19:10:01. Anthropic transport, handled.
+
+**What actually cut the implementers.** Their turn counts:
+
+| package | owned files | turns | cap |
+| --- | ---: | ---: | ---: |
+| WP-003 | 3 | 37 | 40 |
+| WP-002 | 4 | **40** | 40 |
+| WP-001 | 5 | **40** | 40 |
+| WP-004 | 5 | **40** | 40 |
+| WP-005 | 9 | **40** then **50** (xhigh) | 40 / 50 |
+
+Five of six ended *exactly* at their declared `maxTurns`. A three-file package spent 37 of 40. So
+package size was not the discriminator: **the cap was binding at every size**, and the largest
+package was merely the first to be visibly killed by it. Bounding size alone would have left every
+package still finishing on its last turn.
+
+The cap is real and the number in the frontmatter is the number the harness uses. Every agent of
+the run, against its declared limit:
+
+| | declared | used |
+| --- | ---: | ---: |
+| `sonnet-implementer` ×4 | 40 | **40** |
+| `sonnet-implementer` | 40 | 37 |
+| `sonnet-implementer-xhigh` | 50 | **50** |
+| `sonnet-verifier` | 40 | 37 |
+| `sonnet-researcher` ×4 | 30 | 4–23 |
+| `opus-design-coordinator` / `opus-plan-coordinator` | 50 | 18 / 17 |
+| `opus-review-adjudicator` ×2 | 60 | 29, 23 |
+| `opus-review-adjudicator` | 60 | **78** |
+| `opus-execution-coordinator` | 80 | **92** |
+
+Two exceedances, and both are the same thing: they are **exactly the two agents the director
+resumed with `SendMessage`** — the adjudicator at 16:56:05, the coordinator at 19:01:13 and again
+at 19:10:09. Every agent never resumed stayed at or under its limit. So a continuation grants a
+fresh budget, and two distinct declared caps (40 and 50) were each landed on to the turn, which is
+what establishes that the harness reads the declared number rather than applying a hidden ceiling.
+
+What that does **not** establish is that 60 and 80 are honoured above the 50 observed. They are an
+extrapolation of the same mechanism, and the falsifiable prediction is plain: the next run's
+implementers should be able to pass 40. If they stop there anyway, this fix is inert and the entry
+is wrong.
+
+It also explains §Q11's report losses mechanically. WP-001's implementer finished at turn 40, its
+report was rejected on a schema error, and it had **no turn left to use the correction the prompt
+promises it**. "One correction per package" was structurally unavailable to every agent in the run.
+
+Tool calls per turn, measured: **1.00 to 1.22, mean 1.18**. §P8 found 1.00 on two earlier runs, so
+batching moved — a little. That is the real economy: 47 calls spread over 40 turns is 40 whole
+context re-reads, and at two calls per turn the same work costs half of them.
+
+Fixed on all three fronts, in the order the evidence supports rather than the order first proposed:
+
+- **Turn budgets raised** where they were binding: implementer 40 → 60, its xhigh retry 50 → 80,
+  test engineer 40 → 60. Not generosity — room for the verification loop *and* for the one
+  correction the report contract already promises.
+- **`budgets.maxFilesPerWorkPackage: 7`**, refused by the plan gate with the package named and the
+  way out stated. Above every size observed to succeed, below the one observed to fail. The plan
+  review prompt already said *"a task too large to review as one unit will be accepted without
+  being understood"* and did not catch it, which is this project's recurring lesson in its own
+  mirror: an instruction is not an invariant.
+- **The batching instruction carries its measurement now**, because "batch your calls" is advice
+  and "you are at 1.18, two per turn halves the cost" is a target.
+
+`describeBounds` grew a third answer for this. It replied "mechanical — the Stop hook transitions
+the run to BUDGET_EXCEEDED" for every non-advisory bound, which would have been a lie about the
+first bound a *gate* enforces; naming the enforcer is the entire point of that distinction.
+
+### Q14. The report validator crashed on the one shape it exists to refuse
+
+`semanticChecks` opens by stating its own invariant:
+
+> Every field is read defensively: this function runs on reports that have already failed schema
+> validation, so nothing about their shape can be assumed. Crashing here would turn a clean
+> rejection into an opaque exit-1, which is exactly what an agent cannot act on.
+
+Four lines below it calls `.some` on `report.evidence`. `x ?? []` defends against `null` and
+`undefined`, not against an object — and an object is exactly what a live implementer submitted.
+Reproduced: `TypeError: (intermediate value).some is not a function`, **exit 1**, no rejection
+message, no schema errors, nothing the agent could act on. Five sites had the same hole, four of
+them in `ownershipChecks`, all reachable only from a report that had *already* failed the schema.
+
+So §Q11's account was too kind to the system. The implementer did not receive "evidence must be an
+array"; it received a Node stack trace. The message quoted in the coordinator's report was the
+coordinator's own reading of the schema, after the fact.
+
+Two fixes, and the second matters more than the first:
+
+- **`arr()`, used at all five sites.** A `function`, not a `const` arrow — a `const` down there is
+  in its temporal dead zone when the checks run, which is the failure `verify-completion.mjs`
+  already records and which I reproduced while fixing this one. Nine tests now submit an object in
+  place of each array field and assert a clean exit 7 with no `TypeError` in stderr.
+- **A refused report is kept**, in `reports/rejected/`, with the errors beside it. Discarding it
+  was the real cost: the agent had spent its turn budget (§Q13) and could not rewrite what it had
+  observed, so the coordinator re-ran the entire verification to reconstruct it, and §13.5 —
+  *tests demonstrably failing before the fix* — became unverifiable for the whole run. A
+  subdirectory rather than a suffix, because the review pack globs `*.json` in `reports/`: a
+  sibling file would be handed to the contradictor as though the run stood behind a report it had
+  refused. The rejection message now names the path, so the coordinator reads rather than re-runs.
+
+The pattern, for the third time in this section: **the invariant was written as prose and not as
+mechanism.** §Q12's pack announced coverage it did not enforce, §Q13's plan prompt named a risk it
+did not catch, and here a comment described a defence four lines above code that lacked it.
+
+**And this is where the execution coordinator's $17.02 went.** The plan had been to "reduce what
+returns to the coordinator". Measuring what actually entered its context killed that idea:
+
+| share | source |
+| ---: | --- |
+| 65% | its own command output — pytest, ruff, docker |
+| 29% | its own file reads |
+| 4% | run state, gates, tasks |
+| **1%** | **everything returned by the six implementers** |
+
+Reducing the reports would have optimised one percent. The coordinator was re-running every
+implementer's verification itself — because the reports were gone. Its 92 turns and 218 kB of
+context are a *consequence* of this section, not a separate problem, and both connection failures
+struck while it was emitting a dispatch from that context. Its prompt now says to check a report
+rather than re-run it, and to look in `reports/rejected/` before re-running anything — an
+instruction that was not worth giving while refused reports were being thrown away.
+
+### Q15. An external review of the fixes — one real bypass, one blind verdict, and two claims that did not survive
+
+Codex reviewed the staged work as a whole. Eleven findings; each was reproduced or refuted before
+anything was changed.
+
+**Confirmed, and serious.**
+
+*The Git policy was still bypassable.* `resolverRebindingIn` scanned the root command word only,
+so a transparent wrapper hid the builtin from it. Executed, not argued:
+
+| form | bash | zsh |
+| --- | --- | --- |
+| `builtin hash -p /usr/bin/touch git; git status` | **ran `touch`** | no-op |
+| `command hash -p /usr/bin/touch git; git status` | **ran `touch`** | no-op |
+| `builtin alias git=…; eval "git status"` | no-op | **ran `touch`** |
+| `env hash -p /usr/bin/touch git` | no-op | no-op |
+
+Every one was classified ALLOW. The classifier already treats these wrappers as transparent when
+deciding *what runs*; it did not when deciding *what rebinds*, and two views of the same command
+that disagree is the whole bug. A wrapper — and its own flags — no longer consumes command
+position. `env` is correctly untouched: it looks for an executable, and a shell builtin is not one.
+Six rows added, table at **306**.
+
+*A completion verdict was not about anything.* The digest hashed identifiers and statuses, so
+rewriting the implementation to broken code, replacing an evidence proof with a fabrication,
+swapping the command that proof claims to have run, and editing the budget all left it
+byte-identical — reproduced, four for four. It now hashes contents: adjudications, reviews, the
+artefacts each gate reads, the working tree, and the effective configuration. **Per gate**, because
+a single digest over everything refused a legitimate `DESIGN_LOCK → PLAN_DRAFT` — writing
+`tasks.json` invalidated a design verdict that had never read it, and a gate that refuses on inputs
+it never read is one people learn to route around.
+
+The lifecycle test proved the old blindness on itself. It escalates a finding, decides it
+differently with a new rationale, and then transitioned out of `DESIGN_LOCK` on the *original*
+verdict, because `finding_id:decision:resolved` came back to the same triple. It now re-runs the
+gate, which is what the refusal message tells a director to do.
+
+*The large-diff path was unreachable.* `gitTry` defaults to a 400 kB `maxBuffer` and the diff
+collector used it: in a real repository a 561 kB diff came back `null`, the section was marked
+unavailable and the round hard-failed. Everything §Q12 built for that size sat behind a door that
+never opened, and the 600 kB test injected its diff straight into the renderer, so it proved
+nothing about collection. Collection now has a 16 MB budget — deliberately unrelated to the pack's
+cap, because "too large to show" and "too large to read" are different facts — with a real
+repository test above the old limit.
+
+*The delivered report described a run that had not finished.* The phase table requires the final
+report before the run may leave `FINAL_ACCEPTANCE`, so the production artefact opens **"Outcome:
+FINAL_ACCEPTANCE (not terminal yet — regenerate this report after the final transition)"** for a
+run that reached `COMPLETE`. The instruction existed and nobody ran it. A terminal transition now
+regenerates it, best-effort, so a regeneration that cannot run leaves a stale document rather than
+refusing a legitimate ending.
+
+*A report id was a path.* `work_package_id` was validated as "a string" and interpolated into a
+filename: `../../../../escaped` wrote outside the run directory entirely — including through the
+rejected-report preservation added the same day. Constrained by pattern *and* confined by resolved
+path, because the schema is a claim about data and the confinement is a fact about the file. Codex
+also proposed requiring the id to name an existing task; that would have refused
+`SYSTEM-VERIFICATION`, which is a real report and not a task.
+
+*A mistyped bound deletes itself.* `9 > "seven"` is `false`, so a non-numeric override does not
+raise a limit — it silently removes it. True of every numeric budget, not only the new one.
+Non-numeric overrides now fall back to the default and are reported through the channel that
+already exists for a refused override.
+
+*Two smaller ones, both mine.* The report preferred a stored usage stamp over the live transcript,
+so a Stop hook firing *early* pinned a figure for ever — reproduced with a $1 stamp; the transcript
+is now the measurement and the stamp the fallback. And `describeBounds` claimed the Stop hook
+enforces `maxExtraReviewsPerArtifact`, which the Codex adapter enforces.
+
+**Refuted or reduced.**
+
+The recommendation to make `maxFilesPerWorkPackage` advisory was not taken. This project's own
+record is that an advisory bound is a bound nobody obeys — §Q13's plan-review prompt named the
+risk in words and did not catch it. The threshold is provisional and the ledger says so; the type
+check is the part that was genuinely missing. Codex's reading that "the ledger says size was not a
+discriminator" is half the sentence: size was not the *only* discriminator, and nine files
+exhausted both a 40-turn implementer and a 50-turn retry.
+
+**Left open deliberately.** Publishing needs a version bump: the staged runtime differs materially
+from the installed `0.6.2`, and two different implementations must not share one identity. That is
+a release step, not a defect in the code.
 
 ---
 

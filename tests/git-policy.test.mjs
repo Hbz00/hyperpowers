@@ -36,6 +36,13 @@ const ALLOWED = [
   "alias ll='ls -la'",
   'autoload -Uz compinit',
   'echo hash -p /usr/bin/touch git',
+  // Query forms of the same builtins: they report a binding rather than making one. The Docker
+  // probe below is verbatim from a live run, where denying it cost a turn.
+  'alias git',
+  'alias docker',
+  'which docker; docker --version; alias docker 2>/dev/null; type docker',
+  'hash git',
+  'enable git',
 
   'git ls-files',
   'git rev-parse --show-toplevel',
@@ -181,6 +188,19 @@ const DENIED = [
   ['alias git=/usr/bin/touch', /rebinds a name/i],
   ['hash -p /bin/echo bash; bash -c \'git status\'', /rebinds a name/i],
   ['FOO=1 hash -p /usr/bin/touch git', /rebinds a name/i],
+  // Combined flags still bind, so the query-form exemption cannot be reached by writing `-lp`.
+  ['hash -lp /usr/bin/touch git', /rebinds a name/i],
+  ['enable -af /tmp/evil.so git', /rebinds a name/i],
+  // A transparent wrapper does not consume command position. Executed before being added:
+  // in bash both of the first two ran `touch` when `git status` followed, creating a file
+  // called `status`; zsh rebinds through the `alias`+`eval` form instead. The scan used to look
+  // at the root word only, so every one of these was classified as an approved read.
+  ['builtin hash -p /usr/bin/touch git; git status', /rebinds a name/i],
+  ['command hash -p /usr/bin/touch git; git status', /rebinds a name/i],
+  ['command builtin hash -p /usr/bin/touch git; git status', /rebinds a name/i],
+  ['builtin alias git=/usr/bin/touch; eval "git status"', /rebinds a name/i],
+  ['command enable -f /tmp/evil.so git', /rebinds a name/i],
+  ['builtin autoload -Uz git; git status', /rebinds a name/i],
 
   // Read-only subcommands with writing options
   ['git diff --output=patch.txt', /writes a file|forbidden/i],
@@ -544,7 +564,10 @@ describe('touchesGitInternals', () => {
  * was updated. The sweep catches any number near the word "case" that is neither the current
  * count nor one of the historical figures the prose deliberately quotes.
  */
-const COUNT_DOCS = ['README.md', 'docs/validation-ledger.md', 'docs/adr/0003-git-prevention-and-detection.md'];
+// CLAUDE.md was missing from this list and drifted 28 cases stale while every file that was in it
+// stayed correct. A guard covering three of the four places a number lives is a guard the fourth
+// place is free to contradict.
+const COUNT_DOCS = ['README.md', 'docs/validation-ledger.md', 'docs/adr/0003-git-prevention-and-detection.md', 'CLAUDE.md'];
 
 describe('the documented case count matches this table', () => {
   const CASES = ALLOWED.length + ALLOWED_REGRESSIONS.length + DENIED.length;
@@ -554,6 +577,7 @@ describe('the documented case count matches this table', () => {
     ['README.md', /(\d+)-case conformance table/],
     ['docs/validation-ledger.md', /`npm test`: (\d+) Git-policy conformance cases/],
     ['docs/adr/0003-git-prevention-and-detection.md', /It now holds \*\*(\d+)\*\* cases/],
+    ['CLAUDE.md', /git-policy\.test\.mjs`\. (\d+) cases/],
   ]) {
     test(`${file} quotes ${CASES}`, () => {
       const text = readDoc(file);
@@ -570,7 +594,7 @@ describe('the documented case count matches this table', () => {
   // second probe contributed. Anything else near "case"/"cases" is a stale count until proven not.
   // Counts the prose states *about the past* on purpose: 171 was the first draft, 29 the fifth
   // probe round's additions, 278 the size before §Q1's resolver-rebinding cases.
-  const HISTORICAL = new Set([171, 29, 278]);
+  const HISTORICAL = new Set([171, 29, 278, 293, 300]);
 
   for (const file of COUNT_DOCS) {
     test(`${file} states no other case count`, () => {

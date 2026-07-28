@@ -18,7 +18,7 @@ import { readJson, readText, writeFileAtomic } from './lib/io.mjs';
 import { tryLoadState, loadState } from './lib/state.mjs';
 import { REVIEW_ROUNDS, EXTRA_ROUNDS, PHASES, TERMINAL_PHASES } from './lib/phases.mjs';
 import { summarise, scoreAgainstTargets } from './lib/telemetry.mjs';
-import { analyseTranscript } from './lib/transcript.mjs';
+import { analyseTranscript, transcriptPathFor } from './lib/transcript.mjs';
 
 const { positional, flags } = parseArgs();
 const projectRoot = resolveProjectRoot(flags);
@@ -62,7 +62,16 @@ function renderFinal() {
   const a = artifacts(projectRoot, runId);
   const evidence = readJson(a.evidence, null);
   const usage = summarise(projectRoot, runId);
-  const measured = state.observedUsage ?? null;
+  // Measured from the transcript first, and the stored stamp only as a fallback.
+  //
+  // `observedUsage` is written by the Stop controller, which fired once in an 86-minute run (§O14)
+  // and not at all before the report in a four-hour one. Preferring it fixed the never-stamped
+  // case and left the likelier one: a hook that fires *early* pins a figure from the first minutes
+  // of the run and it then wins over fresher data for ever. Reproduced with a $1 stamp and a
+  // larger transcript — the report printed $1.00. The transcript is the measurement; the stamp is
+  // what survives when the transcript cannot be read.
+  const live = analyseTranscript(transcriptPathFor(state), { since: state.createdAt });
+  const measured = live?.available ? live : (state.observedUsage ?? null);
 
   const L = [];
   const p = (...lines) => L.push(...lines);

@@ -36,7 +36,7 @@ Run the full suite, not just the tests near the change. Regressions live elsewhe
 
 Issue every call whose input does not depend on another's result in **one message**. They run in
 parallel and cost one turn; sent one per message they cost one turn each, and every turn re-reads
-your whole context. Reading three files is one message, not three.
+your whole context. Reading three files is one message, not three. Measured across six work packages: **1.18 calls per turn**, so most turns carried one call and paid a full context re-read for it. Two per turn halves the turns the same work costs.
 
 ## What you check beyond the suite
 
@@ -77,7 +77,7 @@ answer and is treated as residual risk. Marking it `satisfied` without proof is 
 Then submit the standard report:
 
 ```bash
-RUN_DIR=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" show --run <RUN_ID> | python3 -c 'import json,sys;print(json.load(sys.stdin)["runDir"])')
+RUN_DIR=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" show --run <RUN_ID> | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).runDir')
 node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-agent-report.mjs" submit --run <RUN_ID> --file "$RUN_DIR/reports/<your-work-package-id>.json"
 ```
 

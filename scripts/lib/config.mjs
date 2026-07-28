@@ -63,13 +63,23 @@ export const DEFAULTS = Object.freeze({
    * `<artifact>-extra` is a real round, the adapter enforces it.
    */
   budgets: {
-    maxCostUsd: 40,
+    maxCostUsd: 100,
     maxDurationMs: 6 * 60 * 60 * 1000,
     maxWorkPackages: 80,
     maxAttemptsPerTask: 3,
     maxExtraReviewsPerArtifact: 1,
     maxFallbacks: 3,
     maxSubagents: 200,
+    /**
+     * Files one work package may own, enforced by the plan gate.
+     *
+     * Not a style preference — a turn budget. Measured across six packages of one run: 3, 4, 5
+     * and 5 owned files finished in 37 to 40 turns against a cap of 40, and **9 files exhausted
+     * both a 40-turn implementer and a 50-turn retry**, leaving the coordinator to finish the
+     * work itself. Seven sits above every size observed to succeed and below the one observed to
+     * fail. Raise it deliberately if a change genuinely cannot be split.
+     */
+    maxFilesPerWorkPackage: 7,
   },
 
   stop: {
@@ -127,6 +137,18 @@ export const ADVISORY_BOUNDS = Object.freeze([
 ]);
 
 /**
+ * Bounds enforced somewhere other than the Stop hook, with where.
+ *
+ * `describeBounds` used to answer "mechanical — the Stop hook transitions the run to
+ * BUDGET_EXCEEDED" for everything not listed as advisory, which would have been a lie about the
+ * first bound enforced by a gate. Naming the enforcer is the whole point of the distinction.
+ */
+export const GATE_ENFORCED_BOUNDS = Object.freeze({
+  maxFilesPerWorkPackage: 'mechanical — the plan gate refuses a package that owns more files',
+  maxExtraReviewsPerArtifact: 'mechanical — the Codex adapter refuses a further extra round',
+});
+
+/**
  * Which bound, if any, this run has passed — one implementation, used at every checkpoint.
  *
  * §K6 found `maxCostUsd` inert because nothing produced a cost figure, and fixed the producer.
@@ -165,7 +187,8 @@ export function describeBounds(config) {
       limit,
       enforcement: ADVISORY_BOUNDS.includes(key)
         ? 'advisory — stated to the coordinator, not enforced by a hook'
-        : 'mechanical — the Stop hook transitions the run to BUDGET_EXCEEDED',
+        : GATE_ENFORCED_BOUNDS[key]
+          ?? 'mechanical — the Stop hook transitions the run to BUDGET_EXCEEDED',
     },
   ]));
 }
@@ -207,6 +230,23 @@ function stripImmutable(overrides) {
   for (const [group, key] of IMMUTABLE_PATHS) {
     if (clone?.[group] && Object.prototype.hasOwnProperty.call(clone[group], key)) {
       rejected.push(`${group}.${key}`);
+      delete clone[group][key];
+    }
+  }
+
+  // A bound whose default is a number must stay one. Every comparison here is `observed > limit`,
+  // and `9 > "seven"` is `false` — so a mistyped override does not raise the limit, it deletes it,
+  // silently, which is the exact defect class this project keeps finding in itself. Reproduced
+  // against `maxFilesPerWorkPackage`; `maxCostUsd` and every other budget had the same exposure.
+  // Dropped back to the default and reported through the channel that already exists for a
+  // refused override, because a bound the user believes they set is worse than one they did not.
+  for (const group of ['budgets', 'concurrency', 'stop', 'codex']) {
+    const defaults = DEFAULTS[group] ?? {};
+    for (const key of Object.keys(clone?.[group] ?? {})) {
+      if (typeof defaults[key] !== 'number') continue;
+      const value = clone[group][key];
+      if (typeof value === 'number' && Number.isFinite(value)) continue;
+      rejected.push(`${group}.${key} (not a finite number: ${JSON.stringify(value)})`);
       delete clone[group][key];
     }
   }

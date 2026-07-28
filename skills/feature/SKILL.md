@@ -1,6 +1,7 @@
 ---
 name: feature
 description: Build a software feature autonomously — brainstorm, design, plan, implement and verify, with six mandatory adversarial reviews and evidence-based completion
+argument-hint: "<what you want built>"
 disable-model-invocation: true
 model: fable
 effort: high
@@ -33,9 +34,14 @@ Therefore:
 ## Start here
 
 ```bash
-RUN=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" init --description "<the user's request, verbatim>" | python3 -c 'import json,sys;print(json.load(sys.stdin)["runId"])')
-node "${CLAUDE_PLUGIN_ROOT}/scripts/preflight.mjs" --run "$RUN"
+INIT=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" init --description "<the user's request, verbatim>")
+printf '%s\n' "$INIT"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/preflight.mjs" --run "$(node -pe 'JSON.parse(process.argv[1]).runId' "$INIT")"
 ```
+
+`init` prints the run id, `runDir`, and the **absolute path of every artefact this run will
+write**. Use those paths verbatim. A path you rebuild yourself from the data root lands outside
+the run: the file is written, the exit gate does not see it, and the transition is refused.
 
 If preflight exits non-zero, transition to `BLOCKED` with its failures as the reason and tell
 the user exactly what to fix. **Do not proceed in a degraded mode.** A run without Codex, or
@@ -45,8 +51,8 @@ unvalidated system. There are no implicit fallbacks (spec §12 phase 0).
 Then walk the machine:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" transition --run "$RUN" --to <PHASE> --actor <tier> --artifact <path>
-node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" show --run "$RUN"      # only when you need the exit requirements
+node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" transition --run "<RUN_ID>" --to <PHASE> --actor <tier> --artifact <path>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" show --run "<RUN_ID>"      # only when you need the exit requirements
 ```
 
 Transitions are validated. An illegal jump or an unmet exit requirement is refused with the
@@ -119,7 +125,7 @@ Routing and effort policy: `references/routing-policy.md`.
 Non-negotiable, in order: design ×2, plan ×2, implementation ×2.
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-adversary.mjs" --run "$RUN" --round <design-1|design-2|plan-1|plan-2|implementation-1|implementation-2>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-adversary.mjs" --run "<RUN_ID>" --round <design-1|design-2|plan-1|plan-2|implementation-1|implementation-2>
 ```
 
 Round 1 of each pair is a general adversarial review; round 2 verifies the corrections rather
@@ -141,7 +147,7 @@ Three, and only three, decisions are yours:
 For each, run the gate verifier first and read *its* summary, not the raw artefacts:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/verify-completion.mjs" --run "$RUN" --gate <design|plan|completion>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/verify-completion.mjs" --run "<RUN_ID>" --gate <design|plan|completion>
 ```
 
 Opus sends you decision packets, not research: 500–1000 tokens, at most three options, one
@@ -167,7 +173,7 @@ renderer going away. Then record it — the gate reads it from the run,
 so publishing without recording leaves the run unfinishable:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" artifact --run "$RUN" \
+node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" artifact --run "<RUN_ID>" \
   --name diagramUrl --value "<url>" --source "$(cat <<'MMD'
 flowchart TD
   ...your diagram...
@@ -178,7 +184,7 @@ MMD
 Then **generate** the final report — do not write it yourself:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/report.mjs" final --run "$RUN"
+node "${CLAUDE_PLUGIN_ROOT}/scripts/report.mjs" final --run "<RUN_ID>"
 ```
 
 It assembles the evidence matrix, the six-round trail, the measured per-tier cost and the diagram

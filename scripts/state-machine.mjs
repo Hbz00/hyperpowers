@@ -18,8 +18,10 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
-import { newRunId, bindSession, artifacts, runsDir, listRuns } from './lib/paths.mjs';
+import { newRunId, bindSession, artifacts, runsDir, listRuns, PLUGIN_ROOT } from './lib/paths.mjs';
 import { ensureDir, writeJson, writeFileAtomic, readJson, nowIso } from './lib/io.mjs';
 import { captureWorkspaceBaseline } from './lib/workspace.mjs';
 import { newState, saveState, loadState, mutateState, transition, checkGate, progressSignature } from './lib/state.mjs';
@@ -228,6 +230,26 @@ function cmdTransition() {
         `Run \`state-machine.mjs check --run ${runId}\` to see the unmet exit requirements.`,
       2,
     );
+  }
+
+  // The final report is required *before* the run may leave FINAL_ACCEPTANCE, so the document a
+  // user is handed was written while the outcome was still pending. The production run proves it:
+  // the delivered report opens "Outcome: FINAL_ACCEPTANCE (not terminal yet — regenerate this
+  // report after the final transition)" for a run that reached COMPLETE. The instruction to
+  // regenerate existed and nobody ran it, which is what an instruction is worth here.
+  //
+  // Regenerated from the transition itself, so the artefact and the outcome are one operation. A
+  // subprocess rather than an import because `report.mjs` is a CLI whose top-level dispatch would
+  // `fail()` on this script's argv. It is best-effort on purpose: the report already exists and
+  // the gate has already read it, so a regeneration that cannot run must not undo a legitimate
+  // terminal transition — it leaves a stale document, which is what happened before.
+  if (isTerminal(state.phase) && fs.existsSync(artifacts(projectRoot, runId).finalReport)) {
+    try {
+      execFileSync(process.execPath, [
+        path.join(PLUGIN_ROOT, 'scripts', 'report.mjs'), 'final',
+        '--project', projectRoot, '--run', runId,
+      ], { stdio: 'ignore', timeout: 30_000 });
+    } catch { /* a stale report is better than a refused terminal transition */ }
   }
 
   emitJson({

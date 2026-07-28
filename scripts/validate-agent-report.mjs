@@ -21,6 +21,7 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { artifacts, PLUGIN_ROOT, activeRunId } from './lib/paths.mjs';
 import { readJson, writeJson, nowIso } from './lib/io.mjs';
@@ -90,11 +91,34 @@ function runCli(mode) {
         });
       } catch { /* counting must never mask the validation error itself */ }
     }
+    // Keep the refused report. Rejecting it used to discard it, and an agent that has already
+    // spent its turn budget cannot rewrite what it observed: in the first production run every
+    // one of six narratives was lost this way or to a turn cap, the coordinator had to re-run the
+    // verification to reconstruct them, and completion condition §13.5 — tests demonstrably
+    // failing before the fix — became unverifiable for the whole run.
+    //
+    // In `reports/rejected/`, not beside the valid ones: the review pack globs `*.json` in
+    // `reports/`, so a sibling would be handed to Codex as though the run stood behind it. A
+    // subdirectory is invisible to that glob without any consumer having to learn a filename rule.
+    let keptAt = null;
+    if (mode === 'submit') {
+      try {
+        const dir = path.join(a0.reportsDir, 'rejected');
+        fs.mkdirSync(dir, { recursive: true });
+        keptAt = confined(dir, `${report?.work_package_id ?? 'unknown'}-attempt${report?.attempt ?? 1}-r${rejections}.json`);
+        if (keptAt) writeJson(keptAt, { rejectedAt: nowIso(), errors: allErrors, submitted: report });
+      } catch { keptAt = null; /* preserving it must never mask the validation error */ }
+    }
+
     const exhausted = rejections > 1;
     fail(
       `Agent report REJECTED (spec §16.4 — a report must carry evidence, not an assertion):\n` +
         allErrors.map((e) => `  - ${e}`).join('\n') +
         `\n\nSchema: ${path.join(PLUGIN_ROOT, 'schemas', 'agent-report.schema.json')}\n` +
+        (keptAt
+          ? `What you submitted is kept at ${keptAt} — the coordinator can read what you observed ` +
+            `without re-running your verification.\n`
+          : '') +
         (exhausted
           ? `This work package has now had ${rejections} rejected reports. Its correction is spent: ` +
             `stop resubmitting and hand it back to the coordinator, which must re-dispatch it ` +
@@ -113,7 +137,8 @@ function runCli(mode) {
 
   const a = a0;
   const reportId = `${report.work_package_id}-attempt${report.attempt ?? 1}`;
-  const stored = a.report(reportId);
+  const stored = confined(a.reportsDir, `${reportId}.json`);
+  if (!stored) fail(`Work package id '${report.work_package_id}' does not resolve inside ${a.reportsDir}.`, 7);
   writeJson(stored, { ...report, storedAt: nowIso() });
 
   mutateState(projectRoot, runId, (s) => {
@@ -157,6 +182,34 @@ function runCli(mode) {
  * Checks the schema cannot express, each aimed at a specific way a report can be technically
  * valid and substantively empty.
  */
+/**
+ * A list, whatever the agent actually sent.
+ *
+ * `x ?? []` only defends against null and undefined. A report whose `evidence` is an *object* —
+ * the exact shape a live implementer submitted — sails past it and dies on `.some`, turning the
+ * clean, actionable rejection this validator exists to produce into a Node stack trace and exit 1.
+ * The comment below already stated the invariant; five call sites did not implement it.
+ *
+ * A `function` and not a `const` arrow: everything here runs from a call at the top of the file,
+ * so a `const` declared down here is in its temporal dead zone when the checks reach it — the
+ * same failure `verify-completion.mjs` records, reproduced while fixing this one.
+ */
+function arr(x) { return Array.isArray(x) ? x : []; }
+
+/**
+ * A destination inside the run's reports directory, or `null`.
+ *
+ * The id comes from the agent and is interpolated into a filename. `../../../../escaped` wrote
+ * `projects/escaped-attempt1-r1.json` — outside the run, outside `reports/`, reproduced. The
+ * schema now constrains the shape, and this constrains the *result*: the two are not redundant,
+ * because the schema is a claim about data and this is a fact about the path that gets written.
+ */
+function confined(dir, name) {
+  const target = path.resolve(dir, name);
+  const base = path.resolve(dir);
+  return target === base || target.startsWith(base + path.sep) ? target : null;
+}
+
 function semanticChecks(report) {
   const problems = [];
   // Every field is read defensively: this function runs on reports that have already failed
@@ -167,7 +220,7 @@ function semanticChecks(report) {
   if (report?.status === 'success' && results.some((r) => r && !r.passed)) {
     problems.push('status is "success" but at least one result is marked failed — reconcile the two.');
   }
-  if (report?.files_modified?.length && !report?.commands_run?.length) {
+  if (arr(report?.files_modified).length && !arr(report?.commands_run).length) {
     problems.push('files were modified but no command was run — a change with no verification is not a result.');
   }
   for (const [i, r] of results.entries()) {
@@ -180,10 +233,10 @@ function semanticChecks(report) {
       problems.push(`results[${i}]: "${observed}" is an assertion, not an observation. Quote what the command actually printed.`);
     }
   }
-  if ((report?.evidence ?? []).some((e) => String(e ?? '').trim().length < 5)) {
+  if (arr(report?.evidence).some((e) => String(e ?? '').trim().length < 5)) {
     problems.push('evidence contains an entry too short to be checkable.');
   }
-  if (report?.status === 'success' && (report?.unverified ?? []).length === 0 && (report?.risks ?? []).length === 0) {
+  if (report?.status === 'success' && arr(report?.unverified).length === 0 && arr(report?.risks).length === 0) {
     // Not fatal, but worth surfacing: total certainty is usually incomplete analysis.
     problems.push('status "success" with no unverified items and no risks — state explicitly what you did not verify, even if the answer is a specific "nothing".');
   }
@@ -200,12 +253,12 @@ function semanticChecks(report) {
  * wrote outside its package has to say so, and saying so has to have a consequence.
  */
 function ownershipChecks(report, tasksFile) {
-  const task = (tasksFile.tasks ?? []).find((t) => t.id === report?.work_package_id);
+  const task = arr(tasksFile?.tasks).find((t) => t?.id === report?.work_package_id);
   if (!task) return [];
-  const owned = new Set([...(task.scope?.owned_files ?? []), ...(task.scope?.files ?? [])].map(normalisePath));
+  const owned = new Set([...arr(task.scope?.owned_files), ...arr(task.scope?.files)].map(normalisePath));
   if (owned.size === 0) return [];
-  const declared = new Set((report?.out_of_scope_changes ?? []).map(normalisePath));
-  const escaped = (report?.files_modified ?? [])
+  const declared = new Set(arr(report?.out_of_scope_changes).map(normalisePath));
+  const escaped = arr(report?.files_modified)
     .map(normalisePath)
     .filter((f) => !owned.has(f) && !declared.has(f));
   if (escaped.length === 0) return [];

@@ -219,20 +219,34 @@ async function main() {
  * The pack does print a coverage warning, but a warning is a request that the reviewer disclose
  * the gap, not a guarantee that the round did its job.
  */
+/**
+ * Context this round cannot run without, and did not get.
+ *
+ * Scoped to targeted rounds until a 120-file change was simulated: the working-tree diff sat at
+ * priority 1, was dropped rather than truncated, and a *general* implementation round would have
+ * returned a verdict having seen the file list, the statistics and the evidence matrix — and no
+ * code — with nothing failing. A general round without its subject is not a weaker review either.
+ */
 function mandatoryGaps(pack) {
-  if (spec.kind !== 'targeted') return [];
   return [
     ...(pack.droppedMandatory ?? []).map((t) => `${t} (dropped entirely)`),
-    ...(pack.truncatedMandatory ?? []).map((t) => `${t} (truncated mid-section)`),
+    // Truncation is only a gap when the reviewer cannot obtain the rest. A diff too large for any
+    // pack is the normal case on a large change, and it carries the command that reads it in
+    // full; failing there would block every big feature. A section truncated with nowhere to go
+    // is the real gap, which is why the recovery path is recorded per section rather than assumed.
+    ...(pack.truncatedMandatoryWithoutRecovery ?? []).map((t) => `${t} (truncated, no source given)`),
+    // Present, small, and empty of the thing it is named after.
+    ...(pack.unavailableMandatory ?? []).map((t) => `${t} (could not be read — placeholder only)`),
   ];
 }
 
 function mandatoryGapMessage(roundName, gaps) {
   return (
     `Review pack for '${roundName}' could not carry context this round cannot run without: ` +
-    `${gaps.join('; ')}.\n\nA targeted round verifies the previous round's findings and their ` +
-    `adjudication (spec §8.7); without all of them it is not a targeted review. Reduce the ` +
-    `artefact under review, or raise codex.reviewPackMaxBytes in .hyperpowers.json.`
+    `${gaps.join('; ')}.\n\nA round that cannot see its own subject — the artefact under review, ` +
+    `or for a targeted round the findings it must verify (spec §8.7) — is not a weaker review, ` +
+    `it is a different one. Reduce the artefact under review, or raise ` +
+    `codex.reviewPackMaxBytes in .hyperpowers.json.`
   );
 }
 

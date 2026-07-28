@@ -17,11 +17,13 @@ import fs from 'node:fs';
 import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { validate } from './lib/validate.mjs';
+import { loadConfig } from './lib/config.mjs';
 import { readJson, readText, nowIso } from './lib/io.mjs';
 import { loadState, mutateState, gateInputDigest } from './lib/state.mjs';
 import { REVIEW_ROUNDS, EXTRA_ROUNDS, ALL_ROUNDS } from './lib/phases.mjs';
 import { logEvent } from './lib/telemetry.mjs';
 import { gitLines } from './lib/review-pack.mjs';
+import { directorTier } from './lib/transcript.mjs';
 import { splitByBaseline, HYPERPOWERS_OWN_FILES } from './lib/workspace.mjs';
 
 const { flags } = parseArgs();
@@ -85,7 +87,7 @@ function main() {
       s.gates[gate] = {
         passed,
         at: result.evaluatedAt,
-        inputs: gateInputDigest(projectRoot, runId, s),
+        inputs: gateInputDigest(projectRoot, runId, s, gate),
         reason: passed ? null : failed.map((f) => f.id).join(', '),
         unverifiable: unverifiable.map((c) => `${c.id}: ${c.detail ?? 'no detail'}`),
         evidence: `${conditions.filter((c) => c.status === 'pass').length}/${conditions.length} conditions passed`,
@@ -246,6 +248,26 @@ function planGate() {
   const cycle = findCycle(tasks);
   add('dependencies-acyclic', 'Task dependencies are acyclic', cycle ? 'fail' : 'pass', cycle ? `cycle: ${cycle.join(' → ')}` : 'no cycles');
 
+  // A package too large for one agent's turn budget does not fail loudly: the agent is cut off
+  // mid-task, its report is lost with everything it observed, and the coordinator finishes the
+  // work itself — a documented circuit-breaker path, entered for a reason nobody chose. Measured:
+  // 3-to-5-file packages used 37–40 of 40 turns, and one 9-file package exhausted a 40-turn
+  // implementer and a 50-turn retry. The plan review prompt already carries "a task too large to
+  // review as one unit will be accepted without being understood" and did not catch it, which is
+  // this project's recurring lesson: an instruction is not an invariant.
+  {
+    const limit = loadConfig(projectRoot).budgets.maxFilesPerWorkPackage;
+    const oversized = tasks
+      .map((t) => ({ id: t?.id ?? '?', n: (t?.scope?.owned_files ?? []).length }))
+      .filter((t) => t.n > limit);
+    add('tasks-sized', `No work package owns more than ${limit} files`,
+      oversized.length ? 'fail' : 'pass',
+      oversized.length
+        ? `${oversized.map((t) => `${t.id} owns ${t.n}`).join(', ')} — split it, or raise ` +
+          'budgets.maxFilesPerWorkPackage in .hyperpowers.json if the change genuinely cannot be split'
+        : `largest package owns ${Math.max(0, ...tasks.map((t) => (t?.scope?.owned_files ?? []).length))} files`);
+  }
+
   // Spec §15: parallel writers must own disjoint files, or they corrupt each other's work.
   const conflicts = fileOwnershipConflicts(tasks);
   add('parallel-safety', 'Packages marked parallel-safe own disjoint files', conflicts.length ? 'fail' : 'pass',
@@ -366,10 +388,22 @@ function completionGate() {
         ? `${fallbacks.length} fallback(s), each recorded on its review: ${fallbacks.map((f) => `${f.round} ${f.from}→${f.to}`).join(', ')}`
         : 'no fallbacks occurred');
 
+  // Three sources, because the first two can be silent. `model_mismatch` needs the Stop controller
+  // to have noticed; `observedDirectorModel` needs it to have run at all — it fired once in an
+  // 86-minute run (§O14) and not before this gate in a four-hour one, so the condition reported
+  // "not observed" about a model the transcript answers on demand. `ok: null` still means
+  // genuinely unobservable.
   const mismatch = readEvents().filter((e) => e.type === 'model_mismatch');
+  const tier = directorTier(state);
+  const wrong = mismatch.length
+    ? `observed ${mismatch[0].observed}, expected ${mismatch[0].expected}`
+    : tier.ok === false
+      ? `observed ${tier.observed} (${tier.family}), expected the ${tier.expected} tier`
+      : null;
+  const observedModel = state.observedDirectorModel ?? tier.observed;
   add('13.12b-director-model', 'The director tier ran on the configured model',
-    mismatch.length ? 'fail' : state.observedDirectorModel ? 'pass' : 'unverifiable',
-    mismatch.length ? `observed ${mismatch[0].observed}, expected ${mismatch[0].expected}` : state.observedDirectorModel ?? 'not observed');
+    wrong ? 'fail' : observedModel ? 'pass' : 'unverifiable',
+    wrong ?? observedModel ?? 'not observed');
 
   // Spec §13 condition 13. This cannot verify that Fable *judged* well — no mechanism can — but
   // it can verify the run actually reached the gate through the director's phase rather than

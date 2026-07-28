@@ -33,7 +33,7 @@ tool here would be one you could never successfully use.
 
 Issue every call whose input does not depend on another's result in **one message**. They run in
 parallel and cost one turn; sent one per message they cost one turn each, and every turn re-reads
-your whole context. Reading three files is one message, not three.
+your whole context. Reading three files is one message, not three. Measured across six work packages: **1.18 calls per turn**, so most turns carried one call and paid a full context re-read for it. Two per turn halves the turns the same work costs.
 
 ## What you owe
 

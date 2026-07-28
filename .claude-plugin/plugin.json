@@ -1,7 +1,7 @@
 {
   "name": "hyperpowers",
   "description": "Bounded autonomous software development: Fable directs, Opus orchestrates, Sonnet executes, Codex contradicts, evidence decides.",
-  "version": "0.6.2",
+  "version": "0.8.2",
   "author": {
     "name": "Corentin S."
   },

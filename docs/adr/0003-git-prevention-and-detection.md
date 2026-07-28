@@ -65,7 +65,7 @@ dangerous than reporting clearly. The guard reports and lets the run fail its ga
 ## What testing changed
 
 The conformance table (`tests/git-policy.test.mjs`) was written first — 171 cases at the time —
-then probed with adversarial inputs *outside* the table. It now holds **293** cases, having grown
+then probed with adversarial inputs *outside* the table. It now holds **306** cases, having grown
 by exactly the defects five successive probe rounds found. That first probe found three real
 holes:
 
@@ -180,7 +180,7 @@ The same probe found the largest false-positive cluster to date, which matters a
 bearing row in the table happened to use `--list`, which is exactly why four rounds missed it.
 
 **Four rounds, four sets of holes, each invisible to the round before it.** The table has grown
-from 171 cases to 293, and every case added after the first draft is a defect that shipped. The
+from 171 cases to 306, and every case added after the first draft is a defect that shipped. The
 useful conclusion is not about shells: it is that *the fixes are the least-reviewed code here*,
 written after each round's scrutiny is spent and shipped without passing through the process that
 found what they fix. Round four's third bypass was created by round three's fix. Probe the fixes

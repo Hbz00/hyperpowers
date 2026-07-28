@@ -30,6 +30,11 @@ Challenge, in roughly this order of value:
 - Acceptance criteria. Are they observable and falsifiable, or are they aspirations? A criterion
   that cannot fail is not a criterion.
 - Reversibility. Which decisions here are expensive to undo, and is that cost acknowledged?
+- Duplication and maintainability. Logic restated where it already exists three files away;
+  a helper that duplicates one in the codebase; a shape that will cost a rewrite at the next
+  change. Say which existing code it should have used.
+- Over-engineering. Abstraction, configurability or generality the criteria do not ask for. The
+  cheapest correct design that meets the criteria wins ties.
 </attack_surface>
 
 <review_method>

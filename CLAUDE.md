@@ -136,7 +136,7 @@ status or a bound, find its producer before you trust its consumer.
 
 Three genres, each catching what the others cannot:
 
-- **Conformance table** — `tests/git-policy.test.mjs`. 278 cases; extend the policy by adding
+- **Conformance table** — `tests/git-policy.test.mjs`. 306 cases; extend the policy by adding
   rows. Three docs quote that number and a test fails if any of them drifts, including a sweep
   for stray counts near the word "case". If you change the table size, update the prose those
   tests point at.

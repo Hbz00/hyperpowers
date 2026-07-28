@@ -18,7 +18,9 @@
   ],
   "properties": {
     "work_package_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "description": "Work package id. Constrained because it is interpolated into the stored report's filename: an id of '../../../../escaped' wrote outside the run directory entirely — reproduced."
     },
     "agent": {
       "type": "string",

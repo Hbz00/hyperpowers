@@ -26,6 +26,11 @@ A step that "obviously" implies something unstated is a defect, not a shortcut.
 - Regression risk. Which existing behaviour does each task endanger, and does anything test it?
 - Divergence. Where does the plan quietly contradict, extend, or narrow the design?
 - Impossibility. Tasks that reference files, symbols or fixtures that do not exist.
+- Duplication and maintainability. Logic restated where it already exists three files away;
+  a helper that duplicates one in the codebase; a shape that will cost a rewrite at the next
+  change. Say which existing code it should have used.
+- Over-engineering. Abstraction, configurability or generality the criteria do not ask for. The
+  cheapest correct design that meets the criteria wins ties.
 </attack_surface>
 
 <review_method>

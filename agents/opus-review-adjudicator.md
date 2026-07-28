@@ -46,7 +46,7 @@ Then decide, using exactly one of:
 Record them all at once:
 
 ```bash
-RUN_DIR=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" show --run <RUN_ID> | python3 -c 'import json,sys;print(json.load(sys.stdin)["runDir"])')
+RUN_DIR=$(node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" show --run <RUN_ID> | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).runDir')
 node "${CLAUDE_PLUGIN_ROOT}/scripts/adjudication-ledger.mjs" record --run <RUN_ID> --round <ROUND> --file "$RUN_DIR/reports/<ROUND>-decisions.json"
 ```
 
@@ -54,7 +54,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/adjudication-ledger.mjs" record --run <RUN_I
 
 Issue every call whose input does not depend on another's result in **one message**. They run in
 parallel and cost one turn; sent one per message they cost one turn each, and every turn re-reads
-your whole context. Reading three files is one message, not three.
+your whole context. Reading three files is one message, not three. Measured across six work packages: **1.18 calls per turn**, so most turns carried one call and paid a full context re-read for it. Two per turn halves the turns the same work costs.
 
 ## Comments stand on their own
 
@@ -63,6 +63,9 @@ Never point a comment at the plan, the design, a review finding or a work packag
 names, strings or prose. Those artefacts live in the run directory and are gone once the run is
 archived; the reader six months from now has only this file open. A comment pointing at something
 they cannot open is worse than no comment.
+
+This includes test docstrings. The contract enumerates its cases by criterion id and your report
+maps them back — the test itself names the behaviour it pins, never `"""AC-11: …"""`.
 
 Comment *why*, briefly, and only where the reason is not evident from the code. Everything else is
 noise.

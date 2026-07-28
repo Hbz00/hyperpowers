@@ -439,19 +439,49 @@ function resolverRebindingIn(command) {
     if (t.type !== 'word') { atCommandStart = true; continue; }
     const text = String(t.value.text ?? '');
     const inCommandPosition = atCommandStart;
-    // `FOO=1 hash …` — leading assignments precede the command name without ending it.
-    if (!ASSIGNMENT.test(text)) atCommandStart = false;
+    const bare = basenameOf(text).toLowerCase();
+    // Three things do not consume command position, so what follows them is still a command name:
+    // a leading assignment (`FOO=1 hash …`), a transparent wrapper, and that wrapper's own flags.
+    //
+    // The wrapper case was a live bypass: `builtin hash -p /usr/bin/touch git; git status` and the
+    // `command` form both put `hash` at argument position, sailed past a scan that only looked at
+    // the root, and **were executed in bash** — `git status` ran `touch` and created a file called
+    // `status`. Verified in both shells: bash rebinds through `builtin` and `command`, zsh does
+    // not, and `env hash` rebinds in neither because `env` looks for an executable and the shell
+    // builtin is not one. The classifier already treats these wrappers as transparent when
+    // deciding *what runs*; treating them transparently here too is what keeps the two views of
+    // the same command from disagreeing.
+    const isWrapper = TRANSPARENT_WRAPPERS.has(bare);
+    const isWrapperFlag = inCommandPosition && text.startsWith('-');
+    if (!ASSIGNMENT.test(text) && !isWrapper && !isWrapperFlag) atCommandStart = false;
     if (!inCommandPosition) continue;
-    if (!RESOLVER_BUILTINS.has(basenameOf(text).toLowerCase())) continue;
+    if (!RESOLVER_BUILTINS.has(bare)) continue;
 
     // Arguments of *this* command only — an operator ends it, so `hash -r; touch git` is not a
     // rebinding and stays allowed.
+    const args = [];
     for (let j = i + 1; j < tokens.length && tokens[j].type === 'word'; j += 1) {
-      const word = String(tokens[j].value.text ?? '');
+      args.push(String(tokens[j].value.text ?? ''));
+    }
+
+    // A bare name binds for `autoload` only; elsewhere it is a query, and denying those refused
+    // `alias docker` in a live environment probe. What binds, checked one form at a time:
+    //
+    //   alias git=…   hash -p /bin/touch git   hash git=…   enable -f lib.so git   autoload -Uz git
+    //
+    // and what does not: `alias git` prints the alias, `hash git` caches the PATH lookup of the
+    // real git, `enable git` enables a builtin of that name and there is no `git` builtin.
+    const builtin = basenameOf(text).toLowerCase();
+    const bareBinds = builtin === 'autoload'
+      || (builtin === 'hash' && args.some((w) => /^-[A-Za-z]*p/.test(w)))
+      || (builtin === 'enable' && args.some((w) => /^-[A-Za-z]*f/.test(w)));
+
+    for (const word of args) {
       let candidate;
       if (word.includes('=')) candidate = word.slice(0, word.indexOf('='));
       else if (word.includes('/')) continue; // a path argument is the target, never the bound name
       else if (word.startsWith('-')) continue; // a flag
+      else if (!bareBinds) continue; // a query, not a binding
       else candidate = word;
       if (protectedName(candidate)) {
         return `${t.value.text} ${word}`;

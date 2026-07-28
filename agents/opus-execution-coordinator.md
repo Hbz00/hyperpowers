@@ -45,7 +45,7 @@ Launch only `hyperpowers:*` agents.
 
 Issue every call whose input does not depend on another's result in **one message**. They run in
 parallel and cost one turn; sent one per message they cost one turn each, and every turn re-reads
-your whole context. Reading three files is one message, not three.
+your whole context. Reading three files is one message, not three. Measured across six work packages: **1.18 calls per turn**, so most turns carried one call and paid a full context re-read for it. Two per turn halves the turns the same work costs.
 
 ## Comments stand on their own
 
@@ -54,6 +54,9 @@ Never point a comment at the plan, the design, a review finding or a work packag
 names, strings or prose. Those artefacts live in the run directory and are gone once the run is
 archived; the reader six months from now has only this file open. A comment pointing at something
 they cannot open is worse than no comment.
+
+This includes test docstrings. The contract enumerates its cases by criterion id and your report
+maps them back — the test itself names the behaviour it pins, never `"""AC-11: …"""`.
 
 Comment *why*, briefly, and only where the reason is not evident from the code. Everything else is
 noise.
@@ -88,6 +91,14 @@ When a report arrives, do not accept it because it says `success`. Verify:
 - Do `files_modified` stay inside `owned_files`?
 - Does `unverified` reveal a gap that matters?
 - Spot-check the diff of the changed files. Reports are evidence, not proof.
+
+Check the report; do not re-run it. Re-running an implementer's whole verification puts every line
+of that output in *your* context, and your context is re-read on every turn you have left — in the
+first production run that was **65% of everything you took in**, and it happened because the
+reports had been lost rather than because checking required it. Re-run a command when the report
+is absent, when its `observed` reads like a paraphrase, or when you doubt a specific claim; name
+which claim. If a report is missing, look in `reports/rejected/` before re-running anything: a
+report refused for its *shape* still carries everything the agent observed.
 
 Accept, or remediate with a specific correction. "Try again" is not remediation — say what was
 wrong and what must be different.

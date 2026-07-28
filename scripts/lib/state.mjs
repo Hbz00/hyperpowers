@@ -10,7 +10,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { readJson, writeJson, withLock, nowIso, sha256, ensureDir } from './io.mjs';
+import { execFileSync } from 'node:child_process';
+import { readJson, readText, writeJson, withLock, nowIso, sha256, ensureDir } from './io.mjs';
+import { loadConfig } from './config.mjs';
 import { artifacts, runDir, PLUGIN_ROOT } from './paths.mjs';
 import { validate } from './validate.mjs';
 import { PHASES, canTransition, isKnownPhase, isTerminal } from './phases.mjs';
@@ -146,7 +148,7 @@ export function checkRequirement(projectRoot, runId, state, requirement) {
     const record = state.gates?.[gate];
     if (!record) return { ok: false, detail: `gate ${gate} not evaluated` };
     if (!record.passed) return { ok: false, detail: `gate ${gate} failed: ${record.reason ?? 'unknown'}` };
-    const now = gateInputDigest(projectRoot, runId, state);
+    const now = gateInputDigest(projectRoot, runId, state, gate);
     if (record.inputs && record.inputs !== now) {
       return {
         ok: false,
@@ -339,30 +341,84 @@ export function transition(projectRoot, runId, to, meta = {}) {
  *
  * Deliberately *not* `state.revision`: the revision counts every mutation, including the Stop
  * controller's own bookkeeping, so binding a verdict to it made `COMPLETE` unreachable — the
- * reachability test caught that within one run of the suite, which is what it is for. What must
- * invalidate a verdict is a change to what it judged: blockers, decisions, review outcomes, task
- * statuses, evidence and observed Git drift. Everything else may move freely between the verifier
- * and the transition.
+ * reachability test caught that within one run of the suite, which is what it is for.
+ *
+ * What must invalidate a verdict is a change to what it judged — and *what it judged* means the
+ * substance, not the labels. Hashing ids and statuses alone left a passing completion gate intact
+ * while the implementation, the evidence proofs, the command a proof cited and the run's budget
+ * were all rewritten underneath it. It now covers the contents of the artefacts each gate reads,
+ * the reviews and adjudications for that gate's rounds, and — for completion only — the working
+ * tree and the effective configuration. Everything outside that gate's reading may still move
+ * freely between the verifier and the transition, which is the point of doing this per gate.
  */
-export function gateInputDigest(projectRoot, runId, state) {
+export function gateInputDigest(projectRoot, runId, state, gate = 'completion') {
   const a = artifacts(projectRoot, runId);
-  const tasks = readJson(a.tasks, { tasks: [] });
-  const evidence = readJson(a.evidence, null);
+  // Per gate, because each one reads different things. A single digest over everything was tried
+  // first and refused a legitimate `DESIGN_LOCK → PLAN_DRAFT`: writing `tasks.json` for the plan
+  // phase invalidated the *design* verdict, which had never read it. Over-binding is not a safer
+  // kind of binding — it makes the check something people learn to route around.
+  const reads = {
+    design: { artefacts: [a.design], artefact: 'design', tree: false, config: false },
+    plan: { artefacts: [a.plan, a.tasks], artefact: 'plan', tree: false, config: false },
+    completion: {
+      artefacts: [a.evidence, a.tasks], artefact: 'implementation', tree: true, config: true,
+    },
+  }[gate] ?? { artefacts: [a.evidence, a.tasks], artefact: null, tree: true, config: true };
+
+  // Matched by artefact prefix rather than a fixed list of round names, so `design-extra` counts
+  // for the design gate. Spec §18 only sanctions an extra round *after* a round-2 blocker, so a
+  // named list would have been blind at precisely the moment a run is in trouble.
+  const pick = (obj) => (reads.artefact
+    ? Object.fromEntries(Object.entries(obj ?? {}).filter(([k]) => k.startsWith(`${reads.artefact}-`)))
+    : (obj ?? {}));
+
   return sha256([
+    gate,
+    // Statuses first: cheap, and they are what a *legitimate* change moves.
     (state.openBlockers ?? []).map((b) => `${b.id}:${b.status ?? 'open'}`).sort().join(','),
-    Object.entries(state.adjudications ?? {})
-      .map(([round, v]) => `${round}:${(v.decisions ?? []).map((d) => `${d.finding_id}:${d.decision}:${d.resolved ? 1 : 0}`).sort().join('|')}`)
-      .sort().join(';'),
-    Object.entries(state.reviews ?? {}).map(([r, v]) => `${r}:${v?.verdict ?? v?.status ?? ''}`).sort().join(','),
-    (tasks.tasks ?? []).map((t) => `${t.id}:${t.status}`).sort().join(','),
-    evidence
-      ? [
-          ...(evidence.criteria ?? []).map((c) => `${c.id}:${c.status}`),
-          ...(evidence.checks ?? []).map((c) => `${c.name}:${c.status}`),
-        ].sort().join(',')
-      : 'no-evidence',
     String((state.gitDrift ?? []).length),
+
+    // Then the contents themselves. Hashing ids and statuses alone let a verdict survive changes
+    // to everything it was a verdict *about*: rewriting an evidence proof to a fabrication,
+    // swapping the command it claims to have run, replacing the implementation with broken code
+    // and editing the budget all left the digest byte-identical — reproduced. A gate answers a
+    // question about a state; if the state's substance can change underneath a passing answer,
+    // the answer is decoration.
+    sha256(JSON.stringify(pick(state.adjudications))),
+    sha256(JSON.stringify(pick(state.reviews))),
+    reads.artefacts.map((f) => sha256(readText(f, 'absent'))).join(','),
+
+    // The working tree, because §13.10 ("no file outside the plan changed") is computed from it.
+    // Without this the one condition that reads the repository was the one condition whose input
+    // could change without invalidating its own verdict. Only the completion gate reads it.
+    reads.tree ? sha256(gitSnapshot(projectRoot)) : 'no-tree',
+
+    // The effective configuration, which decides the bounds the gate reasons under and is re-read
+    // live on every call. `.hyperpowers.json` is excluded from the review pack and the scope check
+    // as Hyperpowers' own file, so a change there is invisible in the diff a reviewer sees.
+    reads.config ? sha256(JSON.stringify(loadConfig(projectRoot))) : 'no-config',
   ].join('|'));
+}
+
+/**
+ * A stable fingerprint of the working tree, or a marker when Git cannot answer.
+ *
+ * The name list and the diff both matter: a file added and a file's contents rewritten are
+ * different changes and neither may pass for the other. Failure is folded into the digest rather
+ * than ignored, so "Git stopped answering" is itself a change of state.
+ */
+function gitSnapshot(projectRoot) {
+  const run = (args) => {
+    try {
+      return execFileSync('git', ['-c', 'core.pager=cat', ...args], {
+        cwd: projectRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000,
+      });
+    } catch {
+      return '(unavailable)';
+    }
+  };
+  return `${run(['status', '--short', '--untracked-files=all'])}\n${run(['diff', 'HEAD'])}`;
 }
 
 export function progressSignature(projectRoot, runId, state) {
