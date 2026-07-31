@@ -2916,6 +2916,164 @@ describe('§S9 — progress is derived, never declared', () => {
     }
   });
 
+  /**
+   * §V14 — the roster, and the width order that keeps the bar alive.
+   *
+   * Decorating a row destroys the harness's own `(+N)` descendant suffix, so until this the plugin
+   * *removed* the only native signal that coordinators and implementers were running underneath the
+   * director — and the panel refuses to draw those agents as rows of their own while their parent is
+   * live. One fixture serves all of it: a real run, a real transcript directory with the meta files
+   * the harness writes per dispatch, and the script driven as a subprocess on a real payload.
+   */
+  const panel = (t) => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-v14-'));
+    t.after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } });
+    const proj = path.join(tmp, 'project');
+    fs.mkdirSync(proj, { recursive: true });
+    const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    const init = JSON.parse(execFileSync('node',
+      [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 'v14', '--description', 'x'],
+      { encoding: 'utf8', env }));
+
+    const transcript = path.join(tmp, 'session.jsonl');
+    fs.writeFileSync(transcript, '');
+    const subs = path.join(transcript.replace(/\.jsonl$/, ''), 'subagents');
+    fs.mkdirSync(subs, { recursive: true });
+    const meta = (id, o) => fs.writeFileSync(path.join(subs, `agent-${id}.meta.json`), JSON.stringify(o));
+
+    // The pyramid a real run makes: Fable at 1, an Opus coordinator at 2, Sonnet workers at 3 —
+    // plus an agent that belongs to somebody else entirely, which a live run does not make ours.
+    meta('dir', { agentType: 'hyperpowers:hyperpowers-director', spawnDepth: 1 });
+    meta('coord', { agentType: 'hyperpowers:opus-execution-coordinator', spawnDepth: 2, parentAgentId: 'dir', description: 'Drive wave 1' });
+    // A second, *different* kind on the same level, so the fixture can catch an unstable order:
+    // insertion order comes from the payload's task map, which guarantees none.
+    meta('res', { agentType: 'hyperpowers:sonnet-researcher', spawnDepth: 2, parentAgentId: 'dir' });
+    meta('i1', { agentType: 'hyperpowers:sonnet-implementer', spawnDepth: 3, parentAgentId: 'coord' });
+    meta('i2', { agentType: 'hyperpowers:sonnet-implementer', spawnDepth: 3, parentAgentId: 'coord' });
+    meta('te', { agentType: 'hyperpowers:sonnet-test-engineer', spawnDepth: 3, parentAgentId: 'coord' });
+    meta('alien', { agentType: 'general-purpose', spawnDepth: 1 });
+
+    const stateFile = path.join(init.runDir, 'state.json');
+    const patch = (o) => {
+      const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      fs.writeFileSync(stateFile, JSON.stringify({ ...s, ...o }));
+    };
+    fs.writeFileSync(path.join(init.runDir, 'tasks.json'), JSON.stringify({
+      tasks: [{ id: 'WP-1', status: 'accepted' }, { id: 'WP-2', status: 'pending' }, { id: 'WP-3', status: 'pending' }],
+    }));
+    patch({
+      phase: 'EXECUTION',
+      history: ['INTAKE', 'BRAINSTORMING', 'DESIGN_DRAFT', 'EXECUTION'].map((to) => ({ to })),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const rows = (columns, { live = ['dir', 'coord', 'res', 'i1', 'i2', 'te', 'alien'] } = {}) => {
+      const out = execFileSync('node', [path.join(ROOT, 'scripts', 'statusline.mjs')], {
+        encoding: 'utf8',
+        env,
+        input: JSON.stringify({
+          session_id: 'v14', cwd: proj, transcript_path: transcript, columns,
+          tasks: Object.fromEntries(live.map((id) => [id, {
+            id, type: 'local_agent', startTime: new Date(Date.now() - 3_900_000).toISOString(),
+          }])),
+        }),
+      });
+      const byId = {};
+      for (const line of out.split('\n').filter((l) => l.trim())) {
+        const row = JSON.parse(line);
+        byId[row.id] = row.content;
+      }
+      return byId;
+    };
+    return { rows, patch, meta };
+  };
+
+  const plain = (s) => String(s).replace(/\u001B\[[0-9;]*m/g, '');
+
+  test('the dispatch walk terminates on a malformed parent chain', async () => {
+    // The one unit here testable without a filesystem, and the one failure the subprocess tests
+    // cannot reach: `metaById` is parsed from files this process does not write, and a
+    // `parentAgentId` cycle — a truncated write, a reused id — would spin a 5 s-budgeted renderer
+    // forever. Termination is structural, not assumed.
+    const { descendantsOf, foldKinds } = await import('../scripts/lib/agent-tree.mjs');
+    const cyclic = new Map([
+      ['a', { agentType: 'x', parentAgentId: 'root' }],
+      ['b', { agentType: 'y', parentAgentId: 'a' }],
+      ['root', { agentType: 'z', parentAgentId: 'b' }], // closes the loop back onto the root
+    ]);
+    const walked = descendantsOf(cyclic, 'root');
+    assert.deepEqual(walked.map((d) => `${d.agentId}@${d.depth}`), ['a@1', 'b@2'],
+      'each agent is visited once, and the root is never re-entered');
+    // Sorted, because the panel redraws every 5 s and the payload's task map carries no ordering
+    // guarantee: a roster that reshuffles between ticks reads as activity that is not happening.
+    assert.deepEqual(foldKinds(['test', 'impl', 'impl']), ['2×impl', 'test']);
+  });
+
+  test('the roster names the descendants the panel refuses to draw', (t) => {
+    // `$PS`/`BHe` keep only tasks with no live registered parent, so a depth-2 agent whose director
+    // is alive never gets a row — the harness signals it as a `(+N)` suffix, in the column our
+    // decoration overwrites. By level and not by parent: with two coordinators live, attributing a
+    // grandchild to one of them would need a path the walk does not carry.
+    const { rows } = panel(t);
+    const row = plain(rows(200).dir);
+    assert.match(row, /↳ execution researcher › 2×implementer test/,
+      'both levels below the director, identical kinds folded, distinct kinds in a stable order');
+    assert.match(row, /EXECUTION/, 'and the ordinary row survives the addition');
+  });
+
+  test('an agent that is not part of the run keeps its own row', (t) => {
+    // Silence is the default at row granularity too. A live run does not make every agent in the
+    // session ours, and `content:""` would *remove* the row rather than leave it alone — omitting
+    // the id is the only way to say nothing.
+    const { rows } = panel(t);
+    const drawn = rows(200);
+    assert.equal(drawn.alien, undefined, 'somebody else’s agent is not decorated at all');
+    assert.match(plain(drawn.coord), /HP·execution-coordinator/, 'ours still are');
+  });
+
+  test('a second director at depth 3 does not get the run’s bar', (t) => {
+    // §S13's impostor: an adjudicator at depth 2 dispatched a `hyperpowers-director` at depth 3 that
+    // could dispatch nothing and held none of the run's context, yet reported as the director to
+    // every consumer comparing names. Here it would take the bar *and* root the roster on the wrong
+    // agent, so the depth check is load-bearing for the roster, not a separate guard.
+    const { rows, meta } = panel(t);
+    meta('impostor', { agentType: 'hyperpowers:hyperpowers-director', spawnDepth: 3, parentAgentId: 'coord' });
+    const drawn = rows(200, { live: ['dir', 'coord', 'impostor'] });
+    assert.match(plain(drawn.dir), /%/, 'the real director keeps the bar');
+    assert.doesNotMatch(plain(drawn.impostor), /%\s/, 'the impostor gets a worker row, not a run’s progress');
+    assert.match(plain(drawn.impostor), /HP·hyperpowers-director/);
+  });
+
+  test('the bar is the last thing to go, at every width', (t) => {
+    // The shipped defect: the idle warning is ~57 characters, the bar was sized from whatever was
+    // left, and `bar()` draws nothing below 8 — so the bar vanished exactly when the run was in
+    // trouble. The fitter sheds cells by an explicit rank instead, and the warning outranks the
+    // phase name because it is the one cell a human can act on.
+    const { rows, patch } = panel(t);
+    patch({ updatedAt: new Date(Date.now() - 45 * 60_000).toISOString() });
+    for (const columns of [200, 116, 76, 56, 40]) {
+      const row = plain(rows(columns).dir);
+      assert.ok(row.includes('█'), `the bar must survive ${columns} columns: ${row}`);
+      assert.match(row, /idle 45m/, `so must the warning at ${columns} columns: ${row}`);
+      assert.ok(row.length <= columns, `${columns} columns, ${row.length} drawn: ${row}`);
+    }
+    // And what is shed is shed in order: the roster before the warning, never the other way.
+    assert.match(plain(rows(200).dir), /↳ execution researcher/, 'wide enough for everything');
+    assert.doesNotMatch(plain(rows(56).dir), /↳/, 'narrow enough that the roster is what pays');
+  });
+
+  test('colour never counts against the width budget', (t) => {
+    // SGR bytes count in `String.length` and not on screen. Measuring the painted string is the
+    // classic way to make a progress bar vanish, so `fitRight()` never sees a colour — and this test
+    // asserts both directions, since "everything was dropped" would satisfy the width bound alone.
+    const { rows } = panel(t);
+    const raw = rows(116).dir;
+    assert.ok(raw.length > plain(raw).length, 'the row really is coloured');
+    assert.ok(plain(raw).length <= 116, `${plain(raw).length} visible columns drawn into 116`);
+    assert.match(plain(raw), /↳ execution researcher › 2×implementer test/,
+      'and at this width nothing had to be dropped to achieve it');
+  });
+
   test('the shipped setting stays inside the two keys a plugin may contribute', () => {
     // Measured from BIN: the allowlist is exactly ["agent","subagentStatusLine"]. Anything else is
     // dropped silently, which would look like a broken feature rather than a rejected setting.

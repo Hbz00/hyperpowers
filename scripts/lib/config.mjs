@@ -34,6 +34,34 @@ export function bareAgentName(name) {
 }
 
 /**
+ * Is this meta file's agent **the** director — the right name *and* the right depth?
+ *
+ * Name is not enough, and §S13 is why: an `opus-review-adjudicator` at depth 2 dispatched a second
+ * `hyperpowers-director` at depth 3, which could dispatch nothing and held none of the run's
+ * context, yet reported as the director to every consumer that compared names. Depth is the
+ * discriminator, and it is only in the meta file the harness writes beside the transcript — not in
+ * any hook payload (§R5).
+ *
+ * One spelling for both consumers, because §U's defect class is a rule implemented in some of the
+ * places it names: `subagent-controller.mjs` decides whose stop drives the phase machine, and
+ * `statusline.mjs` decides whose row carries the run's progress bar and whose dispatch tree the
+ * roster walks. An impostor passing either check puts the run's state on the wrong agent.
+ *
+ * Takes a meta, so a **missing** meta is the caller's decision rather than this function's: the
+ * controller has the payload's `agent_type` to fall back on and treats an unreadable meta as no
+ * evidence against, while the status line has no other identity to use and simply draws no bar.
+ *
+ * `git-policy.mjs` also compares against `DIRECTOR_AGENT` and deliberately **does not** use this.
+ * It asks a different question — *may this dispatch happen* — at `PreToolUse`, about an agent that
+ * does not exist yet: there is no meta and no `spawnDepth` to read, only the requested
+ * `subagent_type`. Do not "unify" the two; the reason they differ is that one is about an agent and
+ * the other is about a request.
+ */
+export function isDirectorMeta(meta) {
+  return bareAgentName(meta?.agentType) === DIRECTOR_AGENT && meta?.spawnDepth === 1;
+}
+
+/**
  * The block at which a controller yields to `SUSPENDED`, one implementation for both loops.
  *
  * The main thread and the director each have their own counter and their own harness cap (§R6),

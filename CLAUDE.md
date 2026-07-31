@@ -134,11 +134,21 @@ a round-5 reviewer once spent a mandatory round raising a blocking finding again
 output. `misplacedOrchestrationFile()` guards every CLI verb that takes a path from an agent.
 
 `scripts/statusline.mjs` belongs to neither column: the root `settings.json` runs it per live
-subagent on a 5 s tick, and it is the only surface a plugin can draw on. It computes nothing itself —
-`scripts/lib/progress.mjs` derives the bar from facts the machine already proves (gates, stored
-review rounds, `tasks[].status === 'accepted'`), under the rule that **nothing there may read a field
-somebody has to remember to update**. It renders silence when no run exists, because the setting is
-global to the plugin.
+subagent on a 5 s tick, and it is the only surface a plugin can draw on. The bar itself is computed
+elsewhere — `scripts/lib/progress.mjs` derives it from facts the machine already proves (gates,
+stored review rounds, `tasks[].status === 'accepted'`), under the rule that **nothing there may read
+a field somebody has to remember to update**. It renders silence when no run exists, and now also
+per row: a live run does not make every agent in the session ours, and to say nothing about a row you
+must **omit its id** — `content:""` deletes the row from the panel (§V14).
+
+Two rendering facts govern any change to that file. `content` replaces everything right of the
+gutter, **including the harness's own `(+N)` descendant suffix**, and the panel draws only *roots* —
+so an agent nested under a live director can never be a row of its own. The roster
+(`scripts/lib/agent-tree.mjs`) is what puts that information back, and it is the one place taking
+**liveness from the payload and parentage from disk**: the task map is ground truth about what is
+running, `subagents/` is never pruned, and `spawnDepth`/`parentAgentId` are not serialised into the
+payload. Widths are fitted on plain text with an explicit drop rank before colour is applied — the
+idle warning silently ate the progress bar until it was (§V14).
 
 ### Fail direction is per hook and deliberate
 

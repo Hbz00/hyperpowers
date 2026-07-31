@@ -129,6 +129,25 @@ renders it and sends it back in. See
 
 All state lives in `$CLAUDE_PLUGIN_DATA`, so a run survives compaction, session loss and restarts.
 
+### What you watch while it runs
+
+The agent panel gets one line, every five seconds:
+
+```
+HP·director ███████░░░░░░░░░░░░░░░░░  30%  PLAN_DRAFT  0/3 wp  54m  $8.41  ↳ plan › 2×implementer
+```
+
+The bar is a walk over milestones the state machine already proves — stored review rounds, passed
+gates, and `x/y wp`, the work packages **accepted** (an implementer's own report cannot claim that).
+It is not a clock, and it never goes backwards: a remediation adds work rather than undoing it, so
+the fill holds and a retreat shows as `↻n`. `↳` is what is running underneath the director, by
+level; the panel cannot give those agents rows of their own while their parent is alive, and press
+`←` to see them individually. If the run stops mutating anything for half an hour the row says so,
+which is the detection half of the brake it does not have.
+
+Narrow terminals shed the roster first and the bar last. Nothing outside your run is decorated, and
+a session with no run is not decorated at all.
+
 `COMPLETE` leaves you three things: the diff in your working tree, uncommitted; a generated report
 with every acceptance criterion, its evidence, the six review rounds and the measured per-tier
 cost; and a **product diagram published as an artifact** — a Mermaid view of what was built,

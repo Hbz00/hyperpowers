@@ -3057,6 +3057,12 @@ measured); and writing to the TTY from a hook (Ink reclaims the frame and the di
 appears for an agent that declares one — it was absent from all 133 probed objects. The bar uses
 Unicode blocks only and does not depend on either.
 
+**Superseded on the rendering side by §V14**, which read `$qf`, `$PS` and `Ac` out of the binary
+rather than probing the payload. ANSI is resolved (fully parsed, mapped onto Ink props). Three
+statements above are corrected there: `content` replaces everything **right of the gutter** and not
+the whole row; what it displaces includes the harness's own `(+N)` descendant suffix; and the panel
+draws only *roots*, so an agent nested under a live director can never be a top-level row.
+
 ### S10. The first live run of the subagent architecture — what it proved, and the defect it caught
 
 Run `20260728T232620Z-tttpzq`, `pilot2`, the same CSV request as run 3 so the two are comparable.
@@ -4525,3 +4531,115 @@ fixes both held; two more were environmental facts nobody had validated. What sh
   reports: marketplace strict validation passes; explicit `plugin.json` strict validation carries
   the one documented warning about the root `CLAUDE.md` (contributor doc, intentionally not
   shipped as plugin context — its own header says so).
+
+### V14. The agent panel, read from the binary — **§S9's rendering contract corrected in three claims**
+
+§S9 shipped a progress bar from a probe of the payload. It never read the *rendering* side, and
+three of its statements about it were wrong or incomplete. Read from the bundled JS in 2.1.220
+(`$qf`, `$PS`/`BHe`, `RX`, `T8f`, `Ac`/`s4u`, `MO`), with the plugin's own live run directories as
+the empirical check on the meta files.
+
+**Correction 1 — `content` does not replace the whole row.** It replaces everything right of the
+gutter. The decorated branch of `$qf` keeps `KDn` (pointer, tree connector, status glyph) in a
+fixed-width box and puts `content` in `flexGrow:1,width:0` with `wrap:"truncate"`:
+
+```js
+Mvt = jsx(k,{width:YDn, flexShrink:0, children:KDn})
+Hjt = jsx(Ac,{children:HQa.content})
+Nvt = jsx(k,{flexGrow:1,width:0,children:jsx(h,{dimColor:AX,bold:n5,wrap:"truncate",children:Hjt})})
+```
+
+What it *does* displace is `descendantSuffix` — the harness's own `(+N)` count of an agent's
+descendants. **So decorating the director deleted the only native signal that the run had
+coordinators and implementers working underneath it.** That is not a cosmetic loss, because of:
+
+**Correction 2 — the panel draws only roots.** `$PS` keeps a task only when it has no *live
+registered* parent:
+
+```js
+function BHe(e,t){ if(t.type==="in_process_teammate"||!t.parentAgentId)return;
+                   let r=e[t.parentAgentId]; return Lj(r)&&r.evictAfter!==0?t.parentAgentId:void 0 }
+```
+
+With nothing drilled into, a depth-2 coordinator whose director is alive is filtered out. Drilling
+in (`viewingAgentTaskId`) admits exactly the viewed agent's children, its siblings and its ancestor
+chain — not the whole subtree. So **level 2 and level 3 can never be top-level rows while the
+director lives**, and the `(+N)` we overwrite was the only thing that said they existed.
+
+**Correction 3 — the payload carries every depth, but not the fields that would tell you so.**
+There is one task store; `createSubagentContext` hands a child the parent's registry object
+(`taskRegistry:e.taskRegistry`), and the tick's filter has no depth predicate
+(`Rel(e)=Object.values(e).filter((t)=>Lj(t)&&t.evictAfter!==0)`). A nested dispatch therefore does
+appear in `tasks`. But `T8f` serialises only
+`id,name,type,status,description,label,startTime,model,effort,contextWindowSize,tokenCount,tokenSamples,cwd`
+— **no `spawnDepth`, no `parentAgentId`**. Liveness is the payload's to give; parentage has to come
+from `subagents/agent-<id>.meta.json`, which carries both and is written at dispatch (§S4 T28,
+re-verified against six metas of a real run spanning depths 1, 2 and 3).
+
+That pair is the whole design of the roster: **liveness from the payload, parentage from disk.** A
+directory walk cannot substitute — `subagents/` is never pruned, so it reports a finished run's
+agents as busy.
+
+**ANSI: resolved, and §S9's "left unverified" is closed.** `content` goes to `Ac`, an ANSI-parsing
+component, not a raw `<Text>`: `s4u` feeds it through a parser and `bd_`/`a4u` map runs onto Ink
+props — named 8/16, `ansi256(N)`, `rgb(r,g,b)`, foreground and background, bold, dim, italic,
+underline, strikethrough, inverse, OSC-8 hyperlinks. Two consequences: **Ink decides whether the
+terminal gets colour**, so no capability detection belongs in a renderer; and the wrapping
+`<Text dimColor={AX}>` (`AX = !selected && !viewed`) means *uncoloured* text renders dim — which is
+what every undecorated row already looks like, so uncoloured metadata is the consistent choice and
+colour is worth spending only on state.
+
+**`NO_COLOR` is a real knob, not an inert one.** The child environment is `{...MO(), ...KDt(...),
+CLAUDE_PROJECT_DIR:...}`, and `MO()` returns `process.env` (or a copy with credentials and OTEL
+variables deleted). The user's environment reaches the renderer.
+
+**Four operational facts that change how a renderer must be written.**
+
+| Fact | Code | Consequence |
+| --- | --- | --- |
+| A non-zero exit discards **every** decoration that tick | `if(f.code!==0)return{}` | one bad row blanks all of them; never exit non-zero |
+| The schema is exactly `{id, content}`, non-strict | `E.object({id:E.string(),content:E.string()})` | extra keys (`color`, `icon`) parse and are silently dropped — there is no second channel |
+| `content:""` **removes** the row | `$PS(...).filter((u)=>t[u.id]?.content!=="")` | to say nothing about a row, omit its id; an empty string is not silence |
+| `columns` is `max(0, terminal - $He())` | `T8f(m, Math.max(0,i-$He()), ...)` | already gutter-adjusted for a **root** row; a nested row's gutter is `$He()+width(treeConnector)`, which `columns` does not know |
+
+**Not plugin-influenceable:** the `◯`/`⏺` glyph (`Tqf=n5?Za:qe.circle` — the filled one means
+"drilled into", not "busy"), its colour (`cZa(status)`: green completed, red failed/killed,
+undefined while running), and the selection pointer. There is no spinner on these rows.
+
+**Multi-line `content` renders as multiple terminal rows and must not be used.** Yoga's text
+measure splits on `\n` and returns a line count as height, and `wrap:"truncate"` truncates by
+visible width without touching newlines — so it does not corrupt the frame. But lines 2..N get no
+gutter, so a hand-drawn tree lands misaligned against the panel's own connectors, and the scroll
+window slices *tasks* rather than lines. One line per row.
+
+**What shipped against all of this.** A roster of the director's live descendants, by relative
+depth, folded (`↳ execution › 2×implementer test`) — levels rather than parents, because
+attributing a grandchild to one of two live coordinators needs a path the walk does not carry, and
+a guessed parentage is a confident wrong claim on the surface a human trusts to tell them the run is
+alive. Rows for agents that are *not* descendants of the run's director are no longer decorated at
+all: a live run does not make every agent in the session ours, and `HP·…` was being stamped on other
+people's. Colour marks state only — bar and percent tinted by phase (cyan working, yellow idle, red
+terminal failure, green `COMPLETE`), the idle warning bold yellow, worker context pressure yellow at
+80% and red at 95%.
+
+**And one defect this found in the shipped bar.** The idle warning added in §V8's wake is ~57
+characters; `directorRow` sized the bar from whatever was left and `bar()` draws nothing below 8
+columns — so **on a 120-column terminal the bar disappeared exactly when the run was in trouble**.
+Widths are now fitted explicitly: cells carry a drop rank, the fitter tries full text, then short
+forms, then sheds the highest rank one at a time, and the bar is reserved its minimum before any of
+it — so no cell is dropped while the bar can merely narrow. Measured across 200/116/76/56/40
+columns with the warning present — **against the test fixture, not a live run**: the rendering side
+of §V14 is read from the binary and exercised by driving the real script on a synthetic payload, and
+no run has yet been watched with the roster on screen. The bar and the warning survive all five
+widths, and the roster is what pays. The warning outranks the phase name deliberately — at 40
+columns the other order rendered `63%  EXECUTION` and dropped the one cell a human can act on.
+
+Colour is applied **after** fitting, because SGR bytes count in `String.length` and not on screen;
+the test asserts both that the row is really coloured and that its visible width fits, since
+"everything was dropped" would satisfy a width bound on its own.
+
+**One guard that was missing here and exists everywhere else.** The status line identified the
+director by name alone, so §S13's depth-3 impostor would have taken the run's progress bar — and,
+now, rooted the roster on an agent with no descendants. `isDirectorMeta()` in `config.mjs` is the
+one spelling of *name and depth 1*, used by `subagent-controller.mjs` and `statusline.mjs`, which is
+§U's "count the sites" applied before the second site could drift.

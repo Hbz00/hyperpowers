@@ -37,7 +37,7 @@ import {
   progressSignature, recordStall, pendingErrand, liveChildren,
 } from './lib/state.mjs';
 import { PHASES, nextAction, stopAllowed, isTerminal } from './lib/phases.mjs';
-import { loadConfig, DIRECTOR_AGENT, bareAgentName, softBlockCap } from './lib/config.mjs';
+import { loadConfig, DIRECTOR_AGENT, bareAgentName, isDirectorMeta, softBlockCap } from './lib/config.mjs';
 import { logEvent, summarise } from './lib/telemetry.mjs';
 import { analyseTranscript, directorTier, subagentMeta } from './lib/transcript.mjs';
 import { nowIso } from './lib/io.mjs';
@@ -236,9 +236,15 @@ await runHook(
     //
     // `spawnDepth` is not in the payload (§R5) but it is in the meta file the harness writes beside
     // the transcript, live (§S4 T28) — which is what `subagentMeta` reads.
+    //
+    // The predicate itself lives in `config.mjs` as `isDirectorMeta`, because `statusline.mjs` asks
+    // the same question for the same reason — whose row carries the run's bar, and whose dispatch
+    // tree the roster walks — and §U's defect class is a rule implemented in some of the places it
+    // names. What stays here is the *fallback*: an unreadable meta is no evidence against an agent
+    // the payload already named as the director, so it is allowed through.
     if (input.transcript_path && input.agent_id) {
       const meta = subagentMeta(input.transcript_path, input.agent_id);
-      if (meta && meta.spawnDepth !== 1) return emitAllowStop();
+      if (meta && !isDirectorMeta(meta)) return emitAllowStop();
     }
 
     // Record which agent is the director — here, where every branch below passes.
