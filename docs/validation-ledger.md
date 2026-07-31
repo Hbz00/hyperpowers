@@ -63,6 +63,9 @@ Observed effort is available: the Stop hook payload carries `effort: {level: "hi
 ### A4. Model pricing tiers — **VALIDATED**
 `BIN` model registry: Fable 5 `pricing: "tier_10_50"`, Opus 5 `tier_5_25`, Sonnet 5
 `tier_3_15` (USD per 1M input/output tokens). Used to recompute §7.2 economics — see §F1.
+*(scope: see §V10 — this row validates the per-token tiers and **nothing about cache multipliers**,
+which were asserted rather than measured. It is also a list price: Sonnet 5's introductory $2/$10
+runs to 2026-08-31 and is deliberately not applied.)*
 
 ### A5. Default effort per model — **VALIDATED**
 All three of Fable 5 / Opus 5 / Sonnet 5 declare `default_effort: "high"`. Spec §7.4's
@@ -232,6 +235,8 @@ text verbatim. Spec §14.4's deterministic Git policy is implementable.
 Observed PreToolUse payload keys:
 `session_id, transcript_path, cwd, prompt_id, permission_mode, hook_event_name, tool_name,
 tool_input, tool_use_id`.
+*(corrected: see §V3 — that key set is a **main-thread** caller's. A call issued from inside a
+subagent also carries `agent_id` and `agent_type`.)*
 
 ### D6. Hook subprocesses inherit project `settings.json` `env` — **VALIDATED**
 `EXP` — with `env: {CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: "11", HP_SETTINGS_ENV_PROBE: "..."}` in
@@ -1612,6 +1617,10 @@ complete runs**:
 
 > **Tool calls per turn: 1.00. Every agent, every phase, no exceptions.**
 
+*(corrected: see §V4 — 1.00 is an identity. The denominator was transcript rows, which never hold two
+`tool_use` blocks; per API request the same two runs measure 1.153 and 1.183, and 47 of run #1's 321
+requests issued two or more calls. The sizing below is withdrawn with it.)*
+
 The harness supports issuing independent calls together in one message. No agent ever did. Batching
 even two at a time removes on the order of 80 Opus turns and 25 director turns from run #1 —
 **roughly a quarter of the bill, with no task removed and no decision moved to a weaker tier.**
@@ -1925,11 +1934,17 @@ Three things follow, and none of them is a routing problem.
 **Context is 81.8% of the bill** — 50.0% cache read, 31.8% cache write, 18.2% generation. §P8 put
 it at two thirds on a shorter run; the longer the run, the harder that ratio tilts, because every
 turn re-reads a context that only grows.
+*(corrected: see §V6 — the total recomputes to 81.9% and the split to 49.4 / 32.5 / 18.1, so the
+number stands; the causal clause does not. Cache write is not a re-read, and on the two runs after
+this one it is the largest term of the four.)*
 
 **The two most expensive agents are the two longest-lived.** The director cost **$20.36** for 9.4%
 of the output at a 243:1 read-to-output ratio — the price of holding four hours in one turn — and
 the execution coordinator **$17.02** across 92 turns, which is *more than all six implementers
 combined* ($12.05). The orchestrator outspent the work it orchestrated.
+*(corrected: see §V5 — true here, and true only here. On runs 8 and 9 the execution coordinator cost
+$2.57 against $3.97 and $6.71 against $6.88. Only the director half generalises, and the largest line
+in run 9 is the adjudicator **role** summed across dispatches, at 36.7%.)*
 
 **Adjudication cost twice the drafting it judged.** Three adjudicator instances, 130 turns,
 **$13.11**, against $3.82 for the design coordinator and $2.66 for the plan coordinator. Twelve
@@ -2093,7 +2108,8 @@ report was rejected on a schema error, and it had **no turn left to use the corr
 promises it**. "One correction per package" was structurally unavailable to every agent in the run.
 
 Tool calls per turn, measured: **1.00 to 1.22, mean 1.18**. §P8 found 1.00 on two earlier runs, so
-batching moved — a little. That is the real economy: 47 calls spread over 40 turns is 40 whole
+batching moved — a little. *(corrected: see §V4 — it did not move; the metric changed. §P8's 1.00 was
+an identity, and the earlier runs measure 1.153 and 1.183 on this run's own denominator.)* That is the real economy: 47 calls spread over 40 turns is 40 whole
 context re-reads, and at two calls per turn the same work costs half of them.
 
 Fixed on all three fronts, in the order the evidence supports rather than the order first proposed:
@@ -2248,7 +2264,1811 @@ exhausted both a 40-turn implementer and a 50-turn retry.
 from the installed `0.6.2`, and two different implementations must not share one identity. That is
 a release step, not a defect in the code.
 
+### Q16. `--agent` pins the main session's model durably — and does **not** pin its effort
+
+Measured on `claude 2.1.220`, headless (`-p`), against a user default of `model: opus[1m]`,
+`effortLevel: high`. Probe agents in `.claude/agents/`, observation from the session transcript
+(`message.model`, `"effort"`) and from hook environments.
+
+**The mechanism exists and is first class.** `BIN` describes `initialPrompt` as the
+*"Auto-submitted first message when this agent runs as the main session (via `--agent` or
+settings). Not read when spawned as a subagent."* `--agent <name>` is a documented CLI flag:
+*"Agent for the current session. Overrides the 'agent' setting."*
+
+| # | Probe | Result |
+| --- | --- | --- |
+| T0 | control, no `--agent` | `claude-opus-5`, effort `high` — the user default |
+| T1 | `--agent` pins `model: haiku` | `claude-haiku-4-5-20251001` — **model pin holds** |
+| T1b | `--agent` pins `model: sonnet, effort: low` | model `claude-sonnet-5`; effort **`high`** — effort ignored |
+| T3 | `--agent` pins `effort: xhigh` (opposite direction) | effort **`high`** again — confirms the pin is ignored, not clamped |
+| T2 | `--model opus --effort xhigh` + `--agent` | `claude-opus-5` / `xhigh` — **CLI beats the agent definition** |
+| T4 | `--resume` T1b's session with a second **user message**, no `--agent` | still `claude-sonnet-5` — **the pin survives a user message** |
+| T5 | `effortLevel: "xhigh"` via `--settings` | effort `xhigh` — effort *is* pinnable, just not from agent frontmatter |
+| T6b | `effortLevel: "xhigh"` in the project's `.claude/settings.json` | effort `xhigh` — **the file `/hyperpowers:setup` already writes** |
+| T8 | `--agent` main session spawns a subagent | `Agent` tool present, subagent ran — depth budget unchanged |
+| T9 | `env` read from a **Bash-tool** subprocess inside an `--agent` session | `CLAUDE_CODE_AGENT=probe2`, `CLAUDE_EFFORT=xhigh` — both inherited |
+
+**T4 is the load-bearing one.** A skill's `model:` pin is cleared by a user message (Q8, ADR-0001);
+a main-session agent's is not. That is the difference between a contract the harness enforces and
+one the interaction style has to protect.
+
+**Hooks are unaffected.** `SessionStart`, `PreToolUse` and `Stop` all fire from an `--agent`
+session, and a plugin's own hook received the correct `CLAUDE_PLUGIN_ROOT` and
+`CLAUDE_PLUGIN_DATA` for *its* plugin (probed with `--plugin-dir`). Omitting `tools:` inherits the
+full toolset — `Read` and `Agent` were both usable.
+
+**Two new observables.** Hook environments carry:
+
+```
+CLAUDE_CODE_AGENT=probe2      # absent entirely in a control session — an exact discriminator
+CLAUDE_EFFORT=xhigh           # the session's effort, directly
+```
+
+T9 checked the half that matters for `verify-completion.mjs`, which runs as a **Bash subprocess**
+and not as a hook: both variables are present there too. That distinction was worth measuring —
+§O1 is the record of a Bash subprocess inheriting *another plugin's* `CLAUDE_PLUGIN_DATA`. These
+two are session-scoped rather than plugin-scoped, so that contamination mode does not apply, but
+the §O1 discipline still holds: the transcript check stays as the cross-check, because an
+environment variable proves what the process was *told*, not what the API was *asked for*.
+
+So *which director agent* and *at what effort* are readable directly, without inferring from
+`message.model`.
+
+**Resolved precedence:** CLI `--model` / `--effort` > agent definition (`model:` only) > settings
+`effortLevel` > user default.
+
+**Correction, recorded because it nearly became a finding.** A first pass concluded that project
+`.claude/settings.json` hooks do not fire without workspace trust. They fire; the probe's
+`settings.json` had been written by a shell heredoc that produced invalid JSON. The lesson is the
+older one from §O1 — an inert config file and a disabled feature look identical from the outside.
+
+**The shipped director, end to end.** With the working tree loaded via `--plugin-dir`:
+
+```
+--agent '__nope__' not found. Available agents: … hyperpowers:hyperpowers-director …
+
+claude -p "…" --agent hyperpowers:hyperpowers-director --effort high
+  models : ['claude-fable-5']        session default was opus[1m]
+  effort : ['high']
+```
+
+An unknown agent name is a **hard error that lists the available agents** — the launch cannot be
+mistyped into a silently wrong tier, which is precisely how the old arrangement failed.
+
+**One thing `--agent` does not fix.** Effort is not pinned by *main-session* agent frontmatter, so
+it rides on the launch flag and is verified rather than declared.
+
+**Corrected by T29 — the claim below was wrong.** This entry originally stated that
+`CLAUDE_CODE_AGENT` read from inside a subagent "names that agent, not the session", and that
+`CLAUDE_EFFORT` there was unmeasured. Both were generalisations from a `--agent` **main session**,
+which is the one place the variable is set. Measured directly:
+
+| Process | `CLAUDE_CODE_AGENT` | `CLAUDE_EFFORT` |
+| --- | --- | --- |
+| main session launched with `--agent X` | `X` | the session's |
+| main session, no `--agent` | **absent** | the session's |
+| dispatched subagent declaring `effort: low` | **absent** | **`low`** — its own |
+| dispatched subagent declaring `effort: xhigh` | **absent** | **`xhigh`** — its own |
+
+So `CLAUDE_CODE_AGENT` discriminates *only* a main-session agent, and `CLAUDE_EFFORT` names the
+effort of whichever process reads it. The shipped `launchContext()` therefore classified a
+subagent's call as `launch: 'session'` and then compared that subagent's own effort against the
+director's — `opus-adjudicator-xhigh` running a gate verifier would have reported a divergence that
+does not exist. A live false-positive path, found by measuring a claim this ledger had already
+recorded as fact.
+
+**Scope of this measurement.** All of it is headless (`-p`), invoked from inside another Claude
+session (`CLAUDE_CODE_CHILD_SESSION=1`). The interactive path is *not* covered and is what a real
+terminal run must confirm. ADR-0001 carries the amendment this measurement forced.
+
+### Q17. The environment contract travels on the launch command, so nothing is installed
+
+**T16 — the decisive one.** A Stop hook that blocks unconditionally and counts its own
+invocations, in a session launched with `--agent`:
+
+| Launch | Hook invocations |
+| --- | ---: |
+| no cap set (harness default) | **9** |
+| `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=3` prefixed to the command | **4** |
+
+Identical to D4's result for an ordinary session. The launch command reaches the harness, so the
+one variable with no alternative mechanism does not need a settings file.
+
+**T14 — and it reaches the scripts too.** `env` read from a Bash-tool subprocess inside the
+launched session shows the prefixed variables verbatim, which is how `preflight.mjs` verifies the
+contract from the process it was actually spawned under.
+
+**What this removed.** `/hyperpowers:setup` no longer writes anything; `REQUIRED_SETTINGS`
+(`disableWorkflows`, `includeGitInstructions`) is deleted rather than left unused. Writing the
+project's `.claude/settings.json` had two measured costs, not one:
+
+- It is **project-scoped**, so it changed every *ordinary* session in the repository. That is the
+  whole reason §Q7 demoted `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` to recommended — and why it is back
+  in the launch command now, where its cost lasts exactly as long as the run.
+- It landed **in the working tree**, where a live run's round-5 reviewer raised a *blocking*
+  finding against it, correctly observing an unowned file that "disables workflows and related
+  safeguards". A mandatory review round and an adjudication cycle were spent on our own output.
+
+The own-files exemption in `workspace.mjs` stays, and is now purely a **compatibility** measure:
+nothing writes those files, but repositories configured by an earlier version still contain them
+and no work package will ever own them.
+
+**T17 — the whole chain, with the shipped plugin.** Launched with the real command and
+`--plugin-dir`, the director ran `preflight.mjs` itself and reported `environment-contract: pass`.
+Launch env → harness → Bash subprocess → the script that verifies the contract, end to end.
+
+**`--effort` is load-bearing, not decorative.** That probe omitted `--effort`, and preflight's own
+`director-launch` check — reading `CLAUDE_EFFORT`, not asking the model — reported the run at
+**`medium`** against the configured `high`. So a user who copies the launch command and drops that
+flag gets measurably weaker reasoning at every gate, with only a warning. Observed once and the
+mechanism is *not* established (an earlier probe without `--effort` inherited the session's `high`),
+so this is recorded as a reason to keep the flag and keep checking it, not as a rule about defaults.
+
+It is also the first live firing of the effort guard, and it fired on a divergence nobody planted.
+
+**A false conclusion caught in passing.** `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=0` on the launch
+command did *not* block a dispatch, and the variable was visibly present in the process. The
+tempting reading — "launch env is ignored" — would have killed this design. T16 falsifies it; `0`
+is almost certainly read as absent by a `value || default` coercion. **Recorded because `=0` is
+not a usable probe for this variable**, and the next person to reach for it deserves to know.
+
+### Q18. `--agent` does not close the tier question — `--model` still overrides it
+
+§Q16 T2 measured `--model opus --effort xhigh --agent probe2` → `claude-opus-5`. Precedence is
+CLI > agent definition > settings > user default, so `claude --model opus --agent
+hyperpowers:hyperpowers-director` produces an Opus director and the launch mechanism says nothing.
+
+This is why the PREFLIGHT transition guard and completion condition §13.12b **are not redundant**
+now that the launch is enforced. Two ways remain for a run to direct itself with the wrong model:
+an explicit `--model`, and the legacy `/hyperpowers:feature` path. The guard is the only thing that
+sees either, and it costs one transcript read against the four hours and $73 that the failure cost
+twice before it was noticed.
+
 ---
+
+## R. Subagent interactivity, and `SubagentStop` as a controller
+
+Measured against `claude 2.1.220`. `BIN` = JS extracted from the Bun-compiled binary, `EXP` =
+black-box run. Two design questions, asked before writing code; both answers moved a decision.
+
+### R1. `AskUserQuestion` is unavailable inside **every** subagent — **VALIDATED**
+
+`BIN` — one set decides, consulted before anything that could relax it:
+
+```js
+zGe = St_("external")   // TaskOutput, ExitPlanMode, EnterPlanMode, AskUserQuestion, ConnectGitHub,
+                        // propose_skills, WaitForMcpServers, RefreshMcpTools, Workflow,
+                        // ScheduleWakeup, EndConversation
+function B2_({tools:e,isBuiltIn:t,…}){ return e.filter((a)=>{
+  if(WO(a))return!0;                        // MCP tools — R3
+  if(Ga(a,jH)&&o==="plan")return!0;
+  if(zGe.has(a.name))return!1;              // ← unconditional
+  if(!t&&Gpo.has(a.name))return!1;          // ← dead: Gpo = new Set([...zGe])
+```
+
+Every spawn funnels through `hte(agentDef, tools, isAsync, false, …) → B2_`; the fourth argument
+is the only bypass and is `false` on that path. So no frontmatter, no `tools:["*"]`, no permission
+rule restores it — the tool is **removed from the API tool list**, not denied at permission time.
+Built-in agents get no wider access than plugin ones: `Gpo` is a copy of `zGe`, so its line is
+unreachable.
+
+`EXP` — interactive session, where the main thread *does* have the tool. Verbatim:
+
+> `Error: No such tool available: AskUserQuestion. AskUserQuestion is not available inside
+> subagents. Complete the task with the tools provided and return findings to the orchestrator.`
+
+`Gks()` emits that string from exactly `isSubagent && zGe.has(name)`, so it is authoritative.
+`Workflow`, `TaskOutput`, `ScheduleWakeup` and `EndConversation` were then measured the same way
+and returned the identical string — five of the eleven members measured, the rest read from `St_`.
+
+**Consequence here:** `Workflow` is *already* absent from every subagent, so §E1's deny and its
+test only ever needed to cover the main thread.
+
+### R2. `fork` is flag-gated and absent by default — **VALIDATED**
+
+```js
+Eee={agentType:"fork",tools:["*"],maxTurns:200,model:"inherit",permissionMode:"bubble",source:"built-in"}
+function Mt_(){ if(tse())return"disabled";
+  if(Yt(Z.CLAUDE_CODE_FORK_SUBAGENT))return"env"; if(su(…))return"disabled";
+  if(_n())return"disabled"; if(Ke("tengu_copper_fox",!1))return"gb_rollout"; return"disabled" }
+```
+
+`EXP` — a normal session answers **`Agent type 'fork' not found`** while the Agent tool's own
+description still mentions forking. Forced with `CLAUDE_CODE_FORK_SUBAGENT=1` it spawns, and
+returns the *same* refusal: `tools:["*"]` resolves to the already-filtered pool.
+
+Two traps for anyone repeating this. A fork inherits the parent's context, so its **self-reported**
+tool list is the parent's `<system-reminder>` listing, not its own (mine claimed
+`Workflow=PRESENT` — false). And the fork run is necessarily headless, where `_n() && !Sue()`
+disables `AskUserQuestion` for every caller; it still discriminates because `Gks` tests the
+subagent branch *before* the not-enabled branch, which would have said `exists but is not enabled
+in this context`.
+
+### R3. MCP tools bypass the subagent exclusion — **VALIDATED**
+
+`WO(e){return e.name?.startsWith("mcp__")||e.isMcp===!0}` returns `true` on `B2_`'s first line.
+`EXP` — a throwaway stdio MCP server via `--mcp-config --strict-mcp-config`: a subagent called
+`mcp__ask__probe_ping` and got `pong`, in the run where `AskUserQuestion` was absent. **The only
+sanctioned route to user interaction from inside a subagent.**
+
+### R4. MCP `elicitation` works from a subagent, with a worse UI — **VALIDATED**
+
+`EXP` — the `initialize` handshake: `{"roots":{"listChanged":true},"elicitation":{}}`,
+`{"name":"claude-code","version":"2.1.220"}`. A tool call answered by a server→client
+`elicitation/create` with an `enum` schema round-trips. Headless it degrades to
+`{"action":"cancel"}`. Interactive, with a **subagent** as caller, the dialog renders:
+
+```json
+{"action":"accept","content":{"choice":"Yes it rendered"}}
+{"action":"accept","content":{"choice":"Trois — celle-ci incluse"}}
+```
+
+The proof is structural: a client that cannot show a dialog answers `decline` with no content, so
+an `accept` carrying a valid enum member implies a rendered UI and a human selection. The second
+run is self-verifying (the third option could not be picked if only two rendered) and shows UTF-8
+surviving. The `enum` comes straight from the caller's array, so `AskUserQuestion`'s 4-option
+ceiling does not apply.
+
+**But the UI is poorer**: elicitation renders one `message` plus a bare enum, where
+`AskUserQuestion` carries up to four questions per call with a header, a per-option `description`
+and `preview`. That is the real cost of this route.
+
+**Two objections withdrawn.** A bundled server does not breach zero-dependency (`node:fs`,
+`node:path`, no install), and it is not a workspace side-effect: the plugin manifest accepts
+`mcpServers` — *"MCP servers to include in the plugin"* — so installing the plugin is enough and
+nothing is written into the user's project. Nor is `requiresUserInteraction: true` needed;
+elicitation is server-driven. What stands is §B3: plugin agents ignore `mcpServers` frontmatter,
+so the server is **session-wide**, visible to the main thread too. Cosmetic, not a correctness
+cost.
+
+### R5. `SubagentStop` / `SubagentStart` payload — **VALIDATED**
+
+```
+SubagentStart: agent_id, agent_type, cwd, hook_event_name, prompt_id, session_id, transcript_path
+SubagentStop : … + agent_transcript_path, background_tasks, effort, last_assistant_message,
+               permission_mode, session_crons, stop_hook_active
+```
+
+`agent_type` is present and reliable (§L7's filter is sound). Beyond §L7: `agent_id` is stable and
+on **both** events, so start/stop pairing is possible; `transcript_path` stays the **main**
+transcript while `agent_transcript_path` is the subagent's; `session_id` equals the main
+session's, so delegation does not endanger §O1; and `prompt_id` is **identical** across `Stop`,
+`SubagentStart` and `SubagentStop` — which matters in R6.
+
+### R6. A `SubagentStop` block re-drives the subagent, not the run — **VALIDATED**
+
+`EXP` — a hook blocking every `SubagentStop`, counting itself, against a subagent told to say
+`READY`:
+
+| Observation | Result |
+| --- | --- |
+| Invocations / blocks honoured | **9 / 8** at harness default — as `Stop` (§D4), on its own counter |
+| With `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=3` | **4 / 3** — the cap env governs `SubagentStop` too |
+| What is re-driven | the **subagent** (`READY → BANANA1 → … → BANANA8`) |
+| Main-thread `Stop` meanwhile | **1** firing, `stop_hook_active=false` |
+| Value returned to the parent | `BANANA8` — the hook's text, not the agent's report |
+
+The two loops are independent: a `SubagentStop` block cannot hold the turn, reach `SUSPENDED` or
+stop the run. Coverage would also shrink — the event fires only when a subagent *ends*, never
+during a long one, never on main-thread-only stretches, and §P3–P9 measured `PLAN_LOCK` at 54–57
+min with `Stop` as the only heartbeat. On the corrupted return value: checked, not assumed —
+`submit` stores the report under `reports/` and the gate tests `task.reports.length`, so §16.4's
+evidence survives on disk; what is destroyed is the coordinator's narrative view.
+
+**Verdict, per mechanism** — the three parts do not port alike, and answering them as one question
+hides the only real defect in the proposal.
+
+- **Budget bounds — portable, and a net gain as an *addition*.** Enforcement does not need
+  blocking: `budgetOverrun()` writes a `BUDGET_EXCEEDED` transition and the next main-thread
+  `Stop` sees `stopAllowed(...)` and ends. The input is there — R5 shows `SubagentStop` carries
+  the **main** `transcript_path`, so `analyseTranscript` computes the same cost. §O14 already
+  forced this check into `transition` because `Stop` fired once in 86 minutes; this is a third
+  sampling point, firing exactly during the long executions where `Stop` does not.
+- **Stall detection — do not port.** `progressSignature` is run-level and keyed on *submitted
+  reports* (§L3). A subagent's process ends before its report is stored, so a healthy wave of *N*
+  agents yields *N* "no new signature" samples: §L3's defect with the sign flipped —
+  there attempting counted as progress, here finishing would count as stalling.
+- **`SUSPENDED` — do not port; the naive port has a bug.** The counter is keyed on `prompt_id`
+  (`if (s.turn.promptId !== promptId) s.turn = {promptId, blocks: 0}`), and R5 measured
+  `prompt_id` identical across all three events. A `SubagentStop` copy would increment the *same*
+  `state.turn.blocks` and trip `softCap` early — suspending a healthy run because subagents
+  finished. It would be watching the wrong cap anyway: the two block counters are independent.
+
+Whatever is added spends the headroom that keeps the report check alive — 20 s declared in
+`hooks.json`, 16 s budgeted, and a hook the harness kills never runs `onError`.
+
+### R7. Park-and-relay: a subagent reaches the user with no MCP — **VALIDATED**
+
+`EXP`, interactive, a level-1 agent standing in for the director: it emitted a question packet and
+ended its turn **with zero tool calls**; the main thread put the questions through
+`AskUserQuestion`; the human answered (free text, over both offered options); `SendMessage`
+resumed it — *"had no active task; resumed from transcript"* — and it returned naming the
+feature and every question id unprompted, reporting the free text as unresolved rather than
+coercing it onto a label. Because the relay is one `AskUserQuestion` tool call, **the turn never
+ends and the B1/B2 model pin holds**. The park is an ordinary subagent stop, so `SubagentStop`
+fires; `validate-agent-report.mjs` does not mistake a parked director for a finished implementer,
+being filtered on `agent_type`.
+
+That run only proved recall of the agent's *own prompt*, which is trivially in the transcript it
+resumes from. A second run tested **discovered** state: three unguessable nonces on disk, two
+fetched by level-2 children (one behind a 40 s `sleep`) and never read by the parent. After the
+park and resume it returned both verbatim and produced the third by spawning a *new* child.
+Transcript audit of the post-resume segment: exactly one tool call, that spawn. So state
+discovered through delegation survives a park, and so does the ability to delegate.
+
+### R7b. A parked agent is re-driven by every child that finishes — **VALIDATED**
+
+Same run, from the level-1 agent's transcript:
+
+| t | event |
+| --- | --- |
+| +4.5s / +6.1s | both children launched |
+| **+10.8s** | park packet emitted — it parked at once |
+| +12.5s | fast child delivered → **parent woken, turn resumed** |
+| +20.4s | packet re-emitted |
+| +71.2s | slow child delivered → woken again |
+| +73.6s | packet re-emitted — the one the parent session received |
+
+The completion notification fires only when an agent stops with **no live background children**,
+so the main thread saw nothing for 73 s although the question existed at 11 s. Hence: park-and-relay
+**cannot overlap with in-flight delegation** — a director that dispatched a wave cannot ask until
+the wave lands; it costs **one parent turn per child** (the packet was generated three times), a
+cost mechanism §P8 does not cover; and this is the one thing the MCP door does better, since an
+MCP question is asked *inside* the parent's turn. R4's worse UI against R7b's concurrency is the
+real trade. Untested mitigation: awaiting children synchronously would collapse the re-drives into
+one turn, losing parallel dispatch.
+
+### R8. The two questions are one decision — **ANALYSIS**
+
+With the director on the main thread, R1–R4 say keep the interactive phases there and leave the
+loop on `Stop`. Move the director into a level-1 subagent and three measured facts flip together:
+
+- **The loop must move, and R6's objection dissolves.** A `SubagentStop` block re-drives the
+  subagent — exactly what a subagent-director needs. R6's verdict holds only while the director is
+  the main thread.
+- **The model pin gets stronger.** §B1 makes a skill's `model:` turn-scoped and fragile; §B4 says
+  plugin agents *do* honour `model` and `effort`. A director defined as an agent has a durable pin.
+  This is the strongest argument for the move, and it has nothing to do with interactivity.
+- **The depth cap becomes binding.** §C1: default 3, harness-enforced. Today
+  main(0) → coordinator(1) → implementer(2) fits; with a director at depth 1 the tree becomes
+  main(0) → director(1) → coordinator(2) → implementer(3) and depth 3 is refused. The move
+  *requires* `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=4` — raising a harness safety limit, in the
+  opposite direction from §4.3's deliberate tightening to 2.
+
+Scope note: after `DESIGN_DRAFT` no user validation is permitted (ADR-0001), so the MCP door would
+only ever serve `BRAINSTORMING` — which is also the one interactive phase that delegates, and
+therefore the only place R7b's constraint bites.
+
+### R9. Rejected third channel: `SendUserMessage` — **VALIDATED (unusable)**
+
+`BIN` — the tool exists (alias `Brief`, *"Send a message the user will read"*) but is gated behind
+the CLI flag `--brief` and is one-way: it could announce a question, never receive its answer.
+Recorded so it is not re-derived.
+
+### R2b. Correction — the skill-level `context: fork` is a different path from the `fork` agent type
+
+§R2 measured the **built-in `fork` agent type** (`agentType:"fork"`, `Mt_()`, answering
+`Agent type 'fork' not found` unless `CLAUDE_CODE_FORK_SUBAGENT` or `tengu_copper_fox`). That
+result is correct and stands.
+
+It does **not** cover the other thing called fork. A *skill* may declare:
+
+```js
+context: E.enum(["inline","fork"])  "inline expands into the current conversation; fork spawns a subagent."
+agent:   "Agent type to spawn when `context: fork`."
+```
+
+`EXP` — a project skill with `context: fork` and `agent: probe-fable` (`model: haiku`), invoked as
+`claude -p "/forkprobe"` in a session defaulting to `opus[1m]`, **with no flag set**:
+
+```
+subagents/agent-acf78….jsonl → models: ['claude-haiku-4-5-20251001']
+meta.json                    → {"agentType": "probe-fable"}
+```
+
+The skill spawned the named agent and the agent's `model:` pin won. A `SubagentStop` hook then
+fired for it carrying `agent_type: probe-fable`, and a `{"decision":"block"}` re-drove it
+(`stop_hook_active` true on the second firing).
+
+Recorded because §R2 reads as though one experiment settles both, and someone will otherwise
+conclude skill-level fork is unavailable when it was measured working. **It changes nothing about
+the decision**: §R1 removes `AskUserQuestion` from the API tool list of *every* subagent with no
+frontmatter bypass, so a forked director still cannot run `INTAKE` or `BRAINSTORMING` without
+park-and-relay (§R7, priced at +1 parent turn per returning child in §R7b) or MCP elicitation
+(§R4). The flag was never the constraint; the tool filter is. Whether skill-level `context: fork`
+is itself gated on other accounts is **unverified**.
+
+---
+
+## S. Budget bounds removed — the cap destroyed runs instead of capping them
+
+### S1. `BUDGET_EXCEEDED` was unreachable-from, and its printed remedy did not exist
+
+The five bounds evaluated by `budgetOverrun()` — `maxCostUsd`, `maxDurationMs`, `maxWorkPackages`,
+`maxSubagents`, `maxFallbacks` — all had one consequence: `transition(… 'BUDGET_EXCEEDED')`.
+
+```js
+// phases.mjs      BUDGET_EXCEEDED: { …, successors: [], requires: [], next: '' }   ← terminal
+// resume-run.mjs  if (isTerminal(state.phase)) fail('A terminal run is not resumable.', 8)
+// stop-controller `Raise it in .hyperpowers.json and \`/hyperpowers:resume\``       ← cannot work
+```
+
+So the bound did not cap a run, it **ended** one permanently. Three quarters through a feature —
+design locked, plan locked, packages built, reviews adjudicated — crossing a number made the run
+unfinishable at any price, and the message it printed told the user to do the one thing the resume
+path refuses. `state-machine.mjs` was honest about it (*"start a new run"*); the hook was not.
+
+**Removed**, on the user's instruction and with no counter-argument worth making. What replaces it
+is `costNotice()`: the measured spend is reported on every transition once it passes
+`budgets.costNoticeUsd` (default 75), and nothing stops. `/hyperpowers:abort` was always the
+honest form of this feature — it is the user's decision, taken with the number in front of them.
+
+**Kept deliberately**, because none of these ever went through `BUDGET_EXCEEDED` and each acts at a
+point where the run can still respond: `maxAttemptsPerTask` and `maxExtraReviewsPerArtifact` (retry
+breakers) and `maxFilesPerWorkPackage` (the plan gate's `tasks-sized` condition, carrying the
+measurement that nine owned files exhausted both a 40-turn implementer and a 50-turn retry).
+
+**The phase is deleted, not merely unreachable** — from `PHASES`, `TERMINAL_PHASES`, `EXECUTION`'s
+successors and `canTransition`'s exemption list. A field the system reads and nothing writes is
+this codebase's signature defect; leaving a terminal phase nothing can enter would have been the
+same shape. `schemas/` never enumerated it, so no schema change was needed. The regression test was
+inverted rather than deleted: it now asserts the transition *happens*, that the notice names the
+figure, and that the phase and `budgetOverrun` are both gone.
+
+**What this does not remove.** Stall detection, the retry breakers, gate refusals and
+`/hyperpowers:abort` are untouched. A run that makes no progress is still escalated and finally
+blocked; what can no longer happen is a run being ended for succeeding expensively.
+
+### S2. The soft cap described a harness nobody was running in
+
+`stop.blockCap` defaulted to **200** — the number `/hyperpowers:setup` used to write into the
+project as `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`. The harness's own default is **8** (§D4, reconfirmed
+on `SubagentStop` in §Q17 T20). The controller yields `softCapMargin` blocks early:
+
+```js
+const softCap = Math.max(1, config.stop.blockCap - config.stop.softCapMargin);   // 200 - 4 = 196
+if (blocks >= softCap) { …transition to SUSPENDED… }
+```
+
+So whenever that variable was **not** in force, the controller waited for a 196th block that could
+never arrive, never yielded, and the harness truncated the turn at 8 — no `SUSPENDED` state, no
+resumable phase, the turn simply gone. The mechanism built to make truncation graceful was inert in
+exactly the sessions that needed it. After §S1 removed the settings file, that is *every* session.
+
+**Fixed** to `blockCap: 8`, the measured reality, still raised by the env var when one is set. The
+margin went `4 → 2` in the same edit: harmless against 200, it would have surrendered half the
+budget against 8, suspending on the fourth block instead of the sixth.
+
+The regression test drives the real controller with **no** `.hyperpowers.json` and the variable
+deleted from the environment, and asserts the run reaches `SUSPENDED` in fewer than 8 blocks. On
+the old default it loops 8 times and never suspends.
+
+### S3. Prerequisites for a level-1 subagent director — four measurements
+
+Taken before writing any of it, because each one could have changed the shape of the code.
+
+**T24 — two `SubagentStop` hooks compose, and a block wins.** `validate-agent-report.mjs` already
+occupies that event; a phase controller would join it. Two hooks registered, one returning `{}` and
+one blocking twice:
+
+```
+blocker#1 active=false    allower#1 active=false
+blocker#2 active=true     allower#2 active=true      ← the subagent was re-driven
+blocker#3 active=true     allower#3 active=true
+```
+
+Both ran on every firing, in **both** orderings of the settings file, and the `{}` did not cancel
+the `block`. So the controller does not have to be merged into the report validator. They run
+concurrently, so neither may assume it is alone in `state.json` — both already write under
+`withLock`, which is what makes that safe.
+
+**T25 — depth 3 works on the harness default, and the variable Hyperpowers used to install breaks
+it.** `main(0) → lvl1(1) → lvl2(2) → lvl3(3)`, evidenced by the subagent transcripts rather than by
+what the agents said about themselves:
+
+| Launch | Subagent transcripts written |
+| --- | --- |
+| no variable (harness default 3) | `lvl1`, `lvl2`, **`lvl3`** |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2` | `lvl1`, `lvl2` — and `lvl2` reported the `Agent` tool *absent from its tool set* |
+
+At depth 2 under a cap of 2 the tool is **removed**, not denied — so the refusal is not something a
+prompt can work around. The director-as-subagent tree therefore needs the default and nothing else,
+which is the same direction as removing the settings file: one fewer thing to install, and the one
+value we used to install would have made the new architecture impossible.
+
+**T26 — a subagent's `effort:` pin holds.** *(read the title literally: this measures effort, and
+§V2 records the eleven sites that cited it for an unconditional **model** pin.)* Three agents
+dispatched in one message. The session
+default was `xhigh` at this measurement; §Q16's effort entries were taken when it was `high`, so a
+reader re-running either probe should read the control column, not the absolute value:
+
+| Agent declares | Observed |
+| --- | --- |
+| `effort: low` | **`low`** |
+| `effort: xhigh` | `xhigh` |
+| nothing | `xhigh` (session default — the control) |
+
+This is the opposite of a skill's `effort:` and of a *main-session* agent's, both of which were
+measured not to hold (§Q16 T1b/T3). Under a subagent director the effort is pinned by frontmatter,
+so no `--effort` flag and no settings key is needed to secure it.
+
+**T27 — a long subagent does not stop between phases.** A six-phase agent (`maxTurns: 40`), each
+phase a real tool call, under a counting `SubagentStop`:
+
+```
+phases recorded: 6/6
+SubagentStop invocations: 1     stop#1 phases_done=6 agent=phaser
+```
+
+**One firing, zero blocks.** The agent ran the whole workflow inside a single dispatch. That
+matches the two independent real-world figures: the main-thread Stop hook fired once in an
+86-minute run (§O14), and the four-hour production run reached `COMPLETE` with `turn.blocks = 0`
+and no `continuation` event at all.
+
+*Honest limit:* this is a six-phase proxy with trivial per-phase work, not nineteen phases with
+subagent waves, Codex rounds and gate refusals — a real director has more occasions to believe it
+is finished. The direction is consistent across three measurements, and §S2 is what makes being
+wrong survivable: the run suspends resumably at six blocks instead of being truncated at eight.
+
+### S4. The director is a subagent — what that changed, and the defect it exposed
+
+`/hyperpowers:feature` now dispatches `hyperpowers-director` instead of directing from the main
+thread. The tier stops depending on the model the user's session happens to be on, with no launch
+flag and no settings file, because a subagent honours its declared `model:` **and** `effort:`
+unconditionally (T26).
+*(corrected: see §V2 — T26 measured **effort**. The model pin holds against the session default, which
+is what this architecture needs, but a per-invocation `model` argument and `CLAUDE_CODE_SUBAGENT_MODEL`
+both outrank it.)*
+
+**Sizing `maxTurns`.** The production run's main-thread director produced **155** assistant
+messages across 4h12 and nineteen phases, with 67 tool calls: `Bash` 28, `TaskOutput` 13, `Agent` 9,
+`SendMessage` 4. 400 is the declared cap. It is *not* 2.6× headroom: `TaskOutput` is removed from
+every subagent (§R1), so those 13 calls become synchronous dispatches, and the same work may cost
+more turns rather than fewer. Caps bind exactly (§Q13) and a truncated director leaves no
+diagnostic, so it is sized to be wrong in the safe direction.
+
+**Three constraints became mechanical.** `Workflow`, `TaskOutput` and `ScheduleWakeup` are all in
+the set the harness strips from subagents (§R1). The director's standing rules against workflow
+orchestration, background dispatch and scheduled wake-ups are now enforced by the tool filter
+rather than by its own prompt — and the production run's 13 `TaskOutput` calls are evidence the
+prompt alone was not enough.
+*(corrected: see §V1 — background dispatch is **not** among them. `run_in_background` is a parameter
+of a tool the director keeps, and run 9b's director used it.)*
+
+**The check had to move, or it would have measured nothing.** `directorTier()` read
+`currentMainThreadModel()`. Under this architecture the main thread is whatever the user is on, so
+the check would have compared the wrong process and failed every run at the first transition. It
+now reads the director's own subagent transcript, located from the main one:
+`<transcript minus .jsonl>/subagents/agent-<id>.{meta.json,jsonl}`, the meta carrying
+`{agentType, description, toolUseId, spawnDepth}`.
+
+**T28 — and that is readable while the agent is still running.** A subagent probing its own session
+directory found its own pair already written (`agentType`, `spawnDepth: 1`, four lines of
+transcript). So the tier is checkable at the first transition rather than only after the fact.
+`spawnDepth` is checked too: a director at any depth but 1 would have coordinators that cannot
+dispatch (T25).
+
+**T29 — a claim this ledger had already recorded as fact was wrong.** §Q16 stated that
+`CLAUDE_CODE_AGENT` read inside a subagent "names that agent", and that `CLAUDE_EFFORT` there was
+unmeasured. Both were generalisations from a `--agent` main session:
+
+| Process | `CLAUDE_CODE_AGENT` | `CLAUDE_EFFORT` |
+| --- | --- | --- |
+| main session with `--agent X` | `X` | the session's |
+| main session, no `--agent` | **absent** | the session's |
+| subagent declaring `effort: low` | **absent** | **`low`** — its own |
+| subagent declaring `effort: xhigh` | **absent** | **`xhigh`** — its own |
+
+The shipped `launchContext()` therefore classified a subagent's call as `launch: 'session'` and
+compared that subagent's own effort against the director's — `opus-adjudicator-xhigh` running a
+gate verifier would have reported a divergence that does not exist. A live false-positive path,
+found only by measuring something already written down as measured. Identity now comes from
+`agentType` in the meta file, and the env-based inference is gone.
+
+**Not yet wired.** The Stop controller still lives on the main thread's `Stop` event, so nothing
+injects phase instructions or detects stalls for a director that is now a subagent. That is Phase 2
+(`SubagentStop`, filtered on `agent_type`, which T24 shows can coexist with the existing report
+validator). Until then the tree is mid-refactor: the pieces below are correct in isolation and no
+end-to-end run is claimed.
+
+### S5. The autonomy loop moved to `SubagentStop`, and the filter is what makes it safe
+
+Blocking `Stop` re-drives the **main thread**, which under §S4 directs nothing. Blocking
+`SubagentStop` re-drives **that subagent** (§R6). So the phase machine moved to
+`scripts/subagent-controller.mjs`, and `stop-controller.mjs` kept one job: while a run is
+non-terminal and the director has returned unfinished, block the main thread with "relay the
+question packet or re-dispatch the director" — so a run cannot be silently abandoned.
+
+**The earlier analysis said not to port two of the three responsibilities. Both objections were
+conditional on the director being the main thread, and both dissolve behind one filter:**
+`agent_type === hyperpowers-director` (§R5: present and reliable).
+
+| Responsibility | Objection under a main-thread director | Under a subagent director |
+| --- | --- | --- |
+| Stall detection | a healthy wave of ten implementers samples as ten "no progress" cycles, because a worker's process ends before its report lands | only the *director* stopping is sampled — the same checkpoint ending a turn used to be |
+| `SUSPENDED` / block counting | `prompt_id` is identical across `Stop` and `SubagentStop`, so a copy would increment the main thread's counter and suspend a healthy run | counted on `agent_id` in `state.directorTurn`, a separate field from `state.turn`; two loops, two counters, 8 blocks each |
+| Cost and tier observation | portable, and wanted | `transcript_path` is still the main transcript, so accounting is unchanged — and this hook fires whenever the director pauses, where `Stop` fired **once** in 86 minutes (§O14) |
+
+Both hooks now on `SubagentStop` coexist: §S3 T24 measured that both run and a block wins over an
+allow, so the controller did not have to be merged into the report validator. They execute
+concurrently and both write state under `withLock`.
+
+**One rung of §16.3 changed meaning.** Its top was "escalate to Fable". The director *is* Fable, so
+escalating is no longer a hand-off: it now tells the director to stop delegating and decide itself.
+The ladder is still named in the injected message, which is what the regression test pins.
+
+**Regression coverage.** A returning `sonnet-implementer` must move neither the stall counter nor
+the director's block counter — the single test that would fail if the filter were dropped, and the
+one defect this move could plausibly have introduced.
+
+### S6. Park-and-relay — the director asks by stopping
+
+`AskUserQuestion` is removed from every subagent's tool list (§R1), so the director writes a packet
+and ends its dispatch. The main thread — which still has the tool — renders it and answers.
+
+**The mechanic that makes it work is a hook that declines to do its job.** The `SubagentStop`
+controller exists to re-drive the director; if it blocked here, the director would go straight back
+into its own turn and the question would never reach the only process able to render one. So a
+pending question is the one case where it **allows** the stop. The main thread's `Stop` hook then
+blocks with the file path and the instruction. Measured end to end:
+
+```
+1. ask                → asked: 1
+2. SubagentStop       → <allow>   "waiting on 1 question(s) from phase INTAKE"
+3. Stop               → block     names AskUserQuestion, and "verbatim"
+4. answer             → answered: 1
+5. SubagentStop       → block     the phase machine resumes
+   Stop               → block     "re-dispatch the director"
+```
+
+**The packet mirrors `AskUserQuestion`'s own input** — 1–4 questions, a `header` of at most 12
+characters, 2–4 options each with a label and a description — and is validated on write against
+`schemas/question-packet.schema.json`. A relay that has to translate is a relay that can quietly
+reword the question; this way the main thread renders rather than interprets.
+
+Three refusals, each measured:
+
+| Attempt | Result |
+| --- | --- |
+| a second question while one is open | refused — *"One question at a time: the answer has to come back before the next is asked."* |
+| 2 answers to 1 question | refused — *"A missing answer becomes an assumption the director did not make."* |
+| an option list of one | refused at write time — `(root).questions[0].options: needs at least 2 item(s), got 1` |
+
+**Truth is the file, not a flag.** `askedAt` without `answeredAt` *is* the pending state. A separate
+state field would be a second thing to keep in step with the packet, which is this codebase's
+recurring defect — one half writes it, the other half forgets.
+
+**Not made mechanical: the wave rule.** §R7b prices parking with children in flight at one director
+turn per returning child, and it stays a prompt rule in both files. The controller cannot see
+in-flight dispatches reliably, and inventing a check it cannot ground would be worse than naming
+the constraint honestly.
+
+### S7. Final sweep before the sandbox run — what the refactor left behind
+
+Removals, each because the thing had stopped having a consumer rather than because it looked untidy:
+
+- **`/hyperpowers:setup` and `scripts/setup.mjs`** — a whole skill and script surviving to print a
+  one-time migration note. The note moved to the README; the plugin now ships four commands.
+- **`currentMainThreadModel()`** — zero consumers since §S4 moved the tier check to the director's
+  own transcript. Exported and dead is the same defect class as read-but-never-written.
+- **`REQUIRED_SETTINGS`, `budgetOverrun()`, `launchCommand()`, `BUDGET_EXCEEDED`** — deleted in
+  §S1/§S4 rather than left unreachable.
+
+Two rules had been copied into two files during the refactor and were extracted before the run:
+`bareAgentName()` (agent names arrive namespaced, must be compared bare) and `softBlockCap()` (when
+a controller yields to `SUSPENDED`). The two loops legitimately have separate *counters*; they do
+not have separate *rules*, and §S2 is what a number that drifts out of step with reality costs.
+
+**One live defect fixed in the sweep.** `report.mjs` read the director's model from
+`state.observedDirectorModel`, a field the `SubagentStop` controller stamps. A director that
+finishes inside a single dispatch never fires that hook, so the final report would have said
+*"not observed"* about a tier the transcripts answer on demand — §O14's "checked once" defect, one
+surface over. It now measures fresh and falls back to the stored value.
+
+**Coverage.** 522 tests. What cannot be covered without a real terminal: that the three phases
+compose — `/hyperpowers:feature` dispatching a Fable director, the `SubagentStop` loop driving it
+through nineteen phases, and a park round-tripping through a human. Every piece is exercised in
+isolation and the seams are tested with real hook payloads; the composition is the sandbox run's
+job, and nothing here claims otherwise.
+
+### S8. An independent review of the 38 staged files — two real defects, both of one kind
+
+Both are the shape this ledger exists to catch, and both were introduced *by* the refactor.
+
+**The phase table still ordered the director to use a tool it does not have.**
+`BRAINSTORMING.next` read *"Use `AskUserQuestion` for every user-facing question — it is a tool
+call and keeps the turn (and the Fable model pin) alive."* That text is not documentation:
+`subagent-controller.mjs` injects `nextAction(phase)` **verbatim** at every yield. So at the one
+interactive phase of the run, the single source of truth contradicted §S6's park-and-relay and
+cited a justification the architecture had abandoned two amendments earlier.
+
+The prompts were updated and the table was not — the exact failure CLAUDE.md warns about ("to
+change the workflow, change that table"). `docs:check` cannot see it: it proves `workflow.md` was
+regenerated, not that it is *true*. §S8's test closes that gap by asserting no phase's injected
+text names any of §R1's eleven stripped tools except to forbid it.
+
+**`ask` shipped without the §20 confinement its two siblings have.** `validate-agent-report` and
+`adjudication-ledger` both guard an agent-supplied path with `misplacedOrchestrationFile`, added
+after a live run wrote `tests/wp-001-report.json` into the working tree. `cmdAsk` accepted
+`--file` unguarded, and the director's prompt said `--file <packet.json>` with no directory — a
+packet left in the project would reach the reviewer as an unowned file and fail the completion
+gate. Guarded, and the prompt now names the run directory.
+
+**Four smaller corrections from the same review.** `skills/resume/SKILL.md` opened by claiming the
+reader *was* the director and denied it two lines later; `fable-gate-reviewer`'s description
+justified itself by "the main-thread director normally decides inline", a director that no longer
+exists; one comment in `verify-completion.mjs` still spoke of a launch command in the present
+tense; and `phases.mjs`'s own header still explained `WAITING_FOR_USER`'s removal by the model pin.
+
+**Two of the reviewer's other points, assessed rather than accepted.** That
+`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` is "the only lever" is not right — `stop.blockCap` in
+`.hyperpowers.json` is the documented lever and `loadConfig()` honours both. The underlying product
+concern is real and stands recorded: with the cap at 8 and the margin at 2, a director needing more
+than six continuations suspends and needs a manual `/hyperpowers:resume`. §S3 T27 measured one
+firing for a six-phase agent, but says plainly that its proxy is not nineteen phases with waves and
+Codex rounds. That is the sandbox run's first question.
+
+### S9. A progress bar, on the one rendering surface a plugin owns
+
+**The refactor is what made this possible.** The agent panel decorates only `local_agent` tasks and
+explicitly excludes the main thread (`Lj`/`hc` in `BIN`). While the director *was* the main thread
+it had no row — the question could not even be asked. Since §S4 it has one, and that row lives for
+the whole run.
+
+**The surface.** The settings allowlist a plugin may contribute is exactly
+`["agent", "subagentStatusLine"]`, verified in `BIN`. `subagentStatusLine` is therefore the only
+place a plugin can draw. Its schema is `{type:"command", command:string}`, described as *"Custom
+per-subagent status line shown in the agent panel; receives row context as JSON on stdin"*. An
+independent probe captured **133 task objects over 77 ticks**: cadence 5 s, no execution at all when
+no subagent is live, `tasks[].id` identical to the agent id in `subagents/agent-<id>.meta.json`, and
+`columns` supplied at the payload root.
+
+**The design problem was bootstrap, not rendering.** Plugin-delivered settings get **no**
+`${CLAUDE_PLUGIN_ROOT}` expansion, and the real cache path carries a version or sha nobody can
+predict. The command therefore finds itself: it globs `~/.claude/plugins/data/hyperpowers-*/`,
+reads `.data-root.json`, and imports `<pluginRoot>/scripts/statusline.mjs`. That marker is **not a
+new producer** — `SessionStart` has stamped it since §O1, and it already carries `pluginRoot` and
+`stampedAt`, so two installations resolve to the freshest one that actually has the script.
+
+**Milestones, not a clock.** `DESIGN_LOCK` is measured at 24–26 min and `PLAN_LOCK` at 54–57 min
+across three runs, but exactly **one** run has ever been timed to `COMPLETE`. A percentage built on
+that denominator would give an n=1 guess the authority of a measurement, so the bar is a weighted
+walk over milestones each of which the state machine already proves — gates, stored review rounds,
+and `tasks[].status === 'accepted'`, the one field an agent's report cannot assert for itself.
+Elapsed time and spend ride beside it as text, never as the fill.
+
+**It does not go backwards.** `PHASES` has real back edges. The fill holds at its high-water mark
+and retreats show as `↻n`, because a remediation *adds* work rather than undoing what was proven —
+and a bar that slides backwards reads as a bug. The counter is what keeps that honest.
+
+**Two things it renders that nobody asked for.** Worker rows show
+`tokenCount / contextWindowSize`, both already in the payload: that is the constraint §Q13 measured,
+where five of six agents ended *exactly* at their turn cap. And silence is the default — the setting
+is global to the plugin, so a session with no Hyperpowers run must be decorated with nothing rather
+than have its default row replaced by our opinion of a run it is not having.
+
+**Rejected, recorded.** Writing `statusLine` into the user's settings (§S1/§S7 just removed the last
+thing that wrote there); a pre-rendered file in `$TMPDIR` read by a dumb renderer (one half writes,
+the other reads — the signature defect, and it would freeze during the longest phase, since hooks
+fire minutes apart against a 5 s tick); decorating a monitor's row (`Lj` keeps only `local_agent`,
+measured); and writing to the TTY from a hook (Ink reclaims the frame and the display corrupts).
+
+**Left unverified deliberately.** Whether ANSI colour survives into `content`, and whether `effort`
+appears for an agent that declares one — it was absent from all 133 probed objects. The bar uses
+Unicode blocks only and does not depend on either.
+
+### S10. The first live run of the subagent architecture — what it proved, and the defect it caught
+
+Run `20260728T232620Z-tttpzq`, `pilot2`, the same CSV request as run 3 so the two are comparable.
+
+**What it proved, in the first 20 minutes.** Read from the subagent transcripts while it ran:
+
+```
+hyperpowers:hyperpowers-director        depth=1   claude-fable-5
+hyperpowers:opus-design-coordinator     depth=2   claude-opus-5
+hyperpowers:sonnet-researcher           depth=2   claude-sonnet-5
+```
+
+`/hyperpowers:feature`, invoked from an ordinary session, produced a **Fable director at depth 1**
+with Opus coordinators beneath it — the pyramid the retired `MAX_SUBAGENT_SPAWN_DEPTH=2` would have
+made impossible. The Codex adapter ran from two levels down and returned a `blocker` verdict that
+was adjudicated and resolved. `observedEffort` came back `high`, from the agent's own frontmatter.
+
+**The defect.** At +46 min the run suspended. `subagent-controller.mjs` opened `SUSPENDED` when the
+director exhausted its block budget — but `SUSPENDED` is in `STOP_ALLOWED_PHASES`, so the main
+thread's Stop hook then saw a stoppable phase and returned immediately, **never reaching the
+re-dispatch branch written for exactly this moment**. The counters are the proof:
+`directorTurn.blocks = 6` saturated against `turn.blocks = 0` never incremented, and zero
+`redispatch_required` events against five `continuation`s.
+
+**Two more defects the same event exposed.**
+
+The message it emitted was *"Run `/hyperpowers:resume`"* — a slash command **no model can execute**,
+delivered to a model. The run survived anyway because the main thread improvised: it resumed the
+director by `agent_id` with `SendMessage`, on its own initiative. A success that depends on a model
+inventing the recovery is the kind that hides the defect rather than revealing it.
+
+And the main thread had dispatched with `run_in_background: true` — its own choice, unaddressed by
+any instruction. That invalidated an assumption stated in the controller's own comment: that a
+synchronous dispatch means the main thread cannot end its turn while the director works. It can,
+and its Stop hook fires throughout.
+
+**The correction, in three parts.**
+
+1. Exhausting a dispatch no longer opens `SUSPENDED`. The controller yields the *dispatch*, logs
+   `dispatch_exhausted`, and leaves the run in its phase — so the main thread's Stop hook finds a
+   live run with no director attached, which is its job to fix.
+2. The instruction names the **agent id** and asks for `SendMessage`, because a fresh `Agent` call
+   starts cold and re-reads the request, design and plan to rebuild context the live agent already
+   holds. That is what the main thread worked out for itself; encoding it removes the luck.
+3. `SUSPENDED` now means only that the **main thread** is out of blocks — the one case where a
+   human genuinely is the next step, and the only place `/hyperpowers:resume` is now printed.
+
+Background dispatch is now prescribed rather than left to chance: it keeps the main thread free to
+render a parked question instead of being blocked inside the call for hours, and it makes the Stop
+hook path load-bearing rather than a fallback.
+
+**Wrongly generalised, and recorded as such.** §S3 T27 measured *one* `SubagentStop` firing for a
+six-phase agent and I extrapolated that a director would rarely need continuations. Its proxy made
+trivial `Bash` calls and dispatched nothing. A real director yields **every time a child returns** —
+six times before `DESIGN_LOCK` alone. The entry said the proxy was not nineteen phases with waves
+and Codex rounds; it was right to, and the extrapolation was still wrong.
+
+### S11. A resume that leaves the counters saturated is not a resume
+
+Observed live: the run suspended at its soft cap, was resumed, and suspended again **90 seconds
+later**. Neither block counter resets on its own — `state.turn` resets on a new `prompt_id`,
+`state.directorTurn` on a new `agent_id` — and a resume changes neither. So a run came back over
+its cap and yielded on the very next hook firing.
+
+`resume-run.mjs` cleared `turn` and **not** `directorTurn`: an omission from the day that field was
+added in §S5, and this codebase's signature defect committed by the same hand that documents it.
+Fixing it there would have fixed one door — a run also leaves `SUSPENDED` by an ordinary transition,
+which skips that script entirely. My first fix put the reset in `transition()` under
+`from === 'SUSPENDED'` — **unreachable code**: `SUSPENDED.successors` is empty, so no legal
+transition leaves it and `resume-run.mjs` writes the state directly. A guard guarding nothing, in
+the same edit that documents that defect class. It lives in `resume-run.mjs`, the only route out.
+
+**A correction to how this was diagnosed.** Three suspensions and a 90-second cycle led me to
+report an autonomous livelock burning money. It was not: every resume was the user's. The
+underlying defect is real and unchanged, but "I cannot distinguish an autonomous loop from a series
+of manual resumes" was the honest statement available at the time, and I asserted the first instead.
+Recorded because the cost of that error is a user acting on an urgency that did not exist.
+
+### S12. The Stop hook nagged a director that had never stopped — and two retractions
+
+**Corrected by the §S13 audit — read that first.** This entry originally blamed the nag loop on a
+background dispatch alone. The timeline shows the main thread's blocks *interleaved* with director
+`continuation` events (02:23:46–02:24:02), so the director was not reliably in flight during those
+nags, and §S13's impostor is the better-supported cause. The in-flight guard below is kept as a
+correct principle — a backgrounded dispatch really does let the main thread end its turn while the
+director works — but it is **not** what the nag loop measured.
+
+**The mechanism as first described.** The main thread dispatches the director with
+`run_in_background: true`, so its turn ends while the director is still working.
+`stop-controller.mjs` inferred: main thread stopping + live run ⇒ director idle. The hook blocked with
+*"The director has stopped but the run has not reached a terminal phase"* — it had not — and the
+main thread dutifully answered `Message queued for delivery to a0c5476641d99d3ae at its next tool
+round`, which is the harness saying the agent is mid-flight. Six of those, then `SUSPENDED`, with
+`plan.md` never written across 162 state revisions.
+
+**The fix costs nothing to discover.** §R5 already recorded that `agent_id` is present on **both**
+`SubagentStart` and `SubagentStop`, so the pair can be tracked: `directorTurn.inFlight` is set on
+start, cleared on stop, and the main thread's Stop hook allows the stop while it is true.
+
+**Retraction 1 — "the main thread redispatches cold instead of resuming".** It did not. The
+transcript shows `SendMessage` to the same `a0c5476641d99d3ae` throughout; it followed the hook's
+instruction. The three director transcripts were one abandoned duplicate the model caught and
+stopped itself, plus the real one. The claim was inferred from file counts, not read from the
+transcript that was available.
+
+**Retraction 2 — "$2.52 per cold restart".** That figure was two cost stamps either side of a
+resume, attributed to a cold-restart mechanism that did not exist. What the interval actually
+contains is the nag loop above: main-thread turns re-reading their own context to send a message
+nobody was waiting for. The cost is real and the explanation was wrong.
+
+**Also measured, and better than expected.** The §S9 status line rendered in the live agent panel:
+
+```
+◯ HP·director ███████░░░░░░░░░░░░░░░░░  30%  ABORTED  ↻1
+```
+
+Bar, percentage, phase and the retreat counter, from a plugin-delivered `subagentStatusLine` that
+found its own script through `.data-root.json`. §S9 no longer needs the caveat that it has never run.
+
+### S13. The impostor director — a full audit of run `20260729T012818Z-i07o3k`
+
+Done properly this time: timeline first, then a subagent inventory with ids and depths, then a
+parent lookup. Three tool calls, and they overturned the two fixes written before them.
+
+**The subagent inventory is the whole finding.**
+
+| window | agent | id | depth | lines |
+| --- | --- | --- | ---: | ---: |
+| 01:28–02:26 | `hyperpowers-director` | `a0c5476641d99d3ae` | 1 | 206 |
+| 01:33:33–01:33:42 | `hyperpowers-director` | `aff603ff8af9a46ac` | 1 | 7 |
+| **02:09:30–02:27:27** | **`hyperpowers-director`** | **`ac42a950912929640`** | **3** | **124** |
+
+The 7-line one is the duplicate the main thread created and stopped itself. The third is the
+finding: `parentAgentId: a1888aa3cf697f04f` — the **`opus-review-adjudicator`**, at depth 2, with
+`description: "Reply to director with design-2 packet"`.
+
+**The cause is a sentence I wrote.** Four coordinator prompts said *"put the verdict on record by
+dispatching the director:"* above a code block naming `hyperpowers:fable-gate-reviewer`. The prose
+and the example contradicted each other and the model followed the prose. Before §S4, "the
+director" named nothing dispatchable and the sentence was harmless; creating `hyperpowers-director`
+turned it into a live, wrong instruction — a defect introduced by a rename, in text nobody re-read.
+
+**The consequences, measured.** A director at depth 3 cannot dispatch at all (`3 >= 3`), so it held
+none of the run's context and could delegate nothing. But it reported as the director to every
+hook: `subagent-controller.mjs` counted its blocks and wrote its id into `directorTurn`. **3 of 23
+recorded `agentId` events belonged to it**, and the id flip-flopped between the two agents for the
+rest of the run — so the Stop hook repeatedly told the main thread to resume the wrong agent.
+`PLAN_DRAFT` never produced `plan.md` across 162 state revisions, and `stallCount` climbed to 3.
+
+**Two fixes, one mechanical.** The prose is corrected in all four coordinators, and
+`subagent-controller.mjs` now requires `spawnDepth === 1` — read from the meta file the harness
+writes live beside the transcript (§S4 T28), since `spawnDepth` is not in the payload (§R5). The
+mechanical guard is what makes the prompt fix non-load-bearing.
+
+**A separate defect, now bounded — see §S14: agents outlive `ABORTED`.** The run was aborted at
+02:26:58; the plan coordinator's transcript runs to 02:36:11 and three `gate=plan passed=False`
+events land at 02:33–02:35. Abort stops the run's *state*, not its subagents — they keep working,
+and keep spending, for minutes afterwards.
+
+**Method note.** The three fixes before this one were each written from a terminal transcript, then
+contradicted by run data. This audit cost three tool calls and would have prevented all three. The
+order is: timeline, inventory, parentage — *then* a mechanism.
+
+### S14. Agents outlive `ABORTED` — what can and cannot be done about it
+
+**What cannot.** Ending a run ends its *state*, not its subagents. The harness keeps them working,
+and `PreToolUse` carries no `agent_id` (§D5) — so no hook can tell a subagent's tool call from the
+user's own, and none can stop them selectively.
+*(corrected: see §V3 — it does carry `agent_id` when the caller is a subagent, so the calls **are**
+distinguishable. The conclusion survives: naming the caller of a tool call still cannot cancel an
+`Agent` call in flight.)* A blanket deny after an abort would take the
+session away from the person who asked for the abort. There is no mechanism here, and pretending
+otherwise would be worse than the leak.
+
+**What can: make them accomplish nothing, and say so.** Measured on the aborted run, verb by verb:
+
+| verb | before | after |
+| --- | --- | --- |
+| `transition`, `task`, `count`, `risk` | already refused | unchanged |
+| `artifact` | **wrote** | refused |
+| `verify-completion` | **evaluated *and recorded*** | evaluates, records nothing |
+
+`verify-completion` is the one that mattered: three `gate=plan passed=False` entries landed seven
+to nine minutes after the abort, from a plan coordinator that ran until 02:36:11. The distinction
+that fixes it without breaking anything is **reporting versus recording** — re-running a gate to
+audit a finished run is legitimate and must keep working; appending to a closed record is not.
+
+The refusal names the end and tells a still-running agent to stop, because the agent reading it is
+the only thing that can act on it.
+
+---
+
+## T. Measured directly for the run-6 fixes
+
+### T1. `PreToolUse` fires for the `Agent` tool; `SubagentStart` genuinely fires — **VALIDATED**
+
+`EXP` — a scratch project with three capture hooks (`PreToolUse` matching `Agent|Task`,
+`SubagentStart`, `SubagentStop`) and one headless session told to dispatch a `general-purpose`
+subagent. All three fired, once each:
+
+| Event | Keys observed |
+| --- | --- |
+| `PreToolUse` | `cwd, effort, hook_event_name, permission_mode, prompt_id, session_id, tool_input, tool_name, tool_use_id, transcript_path` *(corrected: see §V3 — a subagent-issued call adds `agent_id`, `agent_type`)* |
+| `SubagentStart` | `agent_id, agent_type, cwd, hook_event_name, prompt_id, session_id, transcript_path` |
+| `SubagentStop` | … + `agent_transcript_path, background_tasks, effort, last_assistant_message, permission_mode, session_crons, stop_hook_active` |
+
+Three facts this settles, each of which a fix now rests on:
+
+- **`tool_name` is `"Agent"` and `tool_input` carries `subagent_type`** — so a dispatch can be
+  refused before it happens (§S16). `tool_use_id` is present here and absent from both subagent
+  events, which is why the live registry pairs on `agent_id` instead.
+- **`SubagentStart` is a real firing, not a payload shape recovered from the binary.** §R5 recorded
+  its keys but nothing had ever observed one: run 6 registered the hook at 04:29 local and no
+  dispatch followed, so its `state.directorTurn` carries no `inFlight` key at all. The mechanism
+  §S12 first shipped had therefore never executed once. It does fire.
+- **Neither subagent event carries `parentAgentId`.** The meta file beside the transcript does
+  (§S4 T28), so `liveChildren` stores membership only and resolves parentage at read time.
+
+The keys match §R5 exactly, which is now an observation rather than an inference.
+
+### T2. A subagent's prompt cache expires in ~5 minutes; the main session's does not — **VALIDATED**
+
+The dominant cost difference between the two architectures, and nothing in this repository was
+looking at it. Mean tokens per request, bucketed by the idle gap *before* that request, across two
+complete runs of the **same request** in the same sandbox on the same commit:
+
+| gap before request | run 7 — director as **subagent** | run 3 — director as **main thread** |
+| --- | --- | --- |
+| < 1 min | write 1.9k · read 63.8k | write 1.7k · read 69.4k |
+| 1–5 min | write 3.2k · read 57.5k | write 2.8k · read 72.4k |
+| **5–20 min** | **write 62.6k · read 0** | write 2.1k · **read 72.7k** |
+| **> 20 min** | **write 67.8k · read 0** | — |
+
+Read falls to **exactly zero** past five minutes for the subagent and stays at ~72k for the main
+thread. Two rival explanations were tested and one was refuted **using run 3 as its own control**:
+
+- *"the blocking `Agent` call keeps the parent warm"* — **refuted.** Run 3's main thread stayed warm
+  across a 9.5-minute gap with no tool call at all, and across 13.2- and 12.1-minute gaps that did
+  sit inside `Agent` calls. Warm either way.
+- *"subagent conversations get a short TTL"* — **supported.** Run 3's own `opus-plan-coordinator`, a
+  subagent, went **cold at 5.7 minutes**, while its `opus-execution-coordinator` squeaked through at
+  5.1. Run 7's director went cold on all six of its gaps, 8.4 to 25.7 minutes.
+
+Cold restarts (`gap ≥ 5 min ∧ cache_read = 0 ∧ cache_write > 10k`): **9 in run 7 against 1 in run
+3**, 0.62M tokens rewritten against 0.04M — **$6.14 against $0.27**. That single mechanism is
+**43% of the $13.61 gap** between the two runs.
+
+What a restart costs is `context × 1.25 × tier`. The director's prefix at dispatch is **21,471
+tokens** (system prompt, tool schemas, its 15 kB definition); by the last restart it was rewriting
+77k. So the levers are the number of idle windows and the size of what is carried across them —
+**not** the tier split, which is stable at fable 32 / opus 48 / sonnet 20 against 38 / 46 / 16, and
+**not** depth, which is not billed: a worker at d3 in run 7 cost $0.028 per request against $0.027
+for the same worker at d2 in run 3.
+
+**This is a harness property, not a design error, and most of the gap is not recoverable.** Saying so
+is more useful than inventing an optimisation: the measured ceiling on context-slimming is about
+$1, and on halving the idle windows about $1.6.
+*(stale sizing: see §V9 — the qualitative conclusion holds, but at run-9 scale the same mechanism is
+17 windows and 1,469k tokens, a gross term of $18.37 rather than $6.14.)*
+
+### S22. Three defects run 7 found in the tooling
+
+- **`review-<artifact>-1-current` fired on every healthy run.** Round 1 → remediation → round 2 is
+  the mandated cycle, so round 1's digest is stale by construction. Both gates duly reported it as
+  unverifiable while nothing was wrong. A condition that fires when everything is correct teaches
+  people to skim past the ones that are not — the same reasoning that had already excluded the
+  `implementation` rounds, simply not applied here first time. Only the **last** round for an
+  artefact is now asked whether the text still matches.
+
+- **Six `adjudication_resolved` events for five adjudications.** Re-stating a resolution looked
+  identical to closing a new one, so anyone counting the record over-counted the work. Replacing
+  evidence is legitimate and stays on the record under its own name, `adjudication_resolution_replaced`
+  — the same discipline that keeps `policy_blocked` apart from `policy_violation`.
+
+- **The review pack withheld two clauses of the work-package contract.** Found by run 7 itself and
+  recorded as its own residual risk: `summariseTasks` rendered objective, owned files, criteria,
+  commands, dependencies and out-of-scope — and dropped `interfaces` and `constraints`, two of the
+  seven fields the schema defines as the contract, and precisely where a plan goes wrong. Codex was
+  being asked whether a plan was sound with two clauses hidden. The renderer is now driven from a
+  field table, so a field added to the schema reaches the reviewer instead of waiting for somebody
+  to remember this function.
+
+### S23. Artefact size is not the lever it looked like
+
+Run 7's artefacts are 60–90% larger than run 3's on a byte-identical request — `design.md` 21.3k →
+36.3k, `plan.md` 14.5k → 25.3k, review packs +55 to +88%. The first reading was inflation.
+
+Diffing the section structure refutes it. Run 7's design carries sections run 3's does not have at
+all: each open product decision resolved by name, a worked table for the trailing-terminator
+algorithm, the error shapes, and a test strategy with a justified divergence from repo precedent.
+And the reviewer bit *more*, not less — `design-1` raised **3** findings against 36k where run 3
+raised **1** against 21k.
+
+**No bound was added.** Capping artefact size would have bought cost by paying quality, and the
+claim that it bought nothing was withdrawn rather than shipped.
+
+### S15. The loop punished a director for waiting — the defect that ended run 6
+
+12 of run 6's 20 continuations fall inside **one four-minute window**, 02:22–02:26. What was
+happening in it, from the director's own transcript:
+
+> *"The plan coordinator is verified active; a watcher is now armed on `plan.md` + populated
+> `tasks.json` so I'm woken the moment the artefacts land."*
+> *"Yielding until the artefact notification arrives."*
+> *"Coordinator quiet for ~60s — still within normal range for composing the large `plan.md`."*
+
+The director was right every time. It verified the coordinator was alive from its transcript mtime,
+armed a watcher, and explicitly refused to duplicate-dispatch. The machinery read each report as a
+stall sample and charged it a continuation.
+
+**A synchronous dispatch never reaches the hook at all**: across the design coordinator's nine
+minutes the director emitted **zero** continuations, because it was inside a blocking call and never
+stopped. The defect is therefore narrower than "waiting is punished", and the precise statement is:
+
+> After an interrupted synchronous dispatch there is no way back into a blocking wait.
+
+At 02:10:06 the director dispatched `opus-plan-coordinator` with `run_in_background: false`; an API
+connection error cut the call; the only resume available was `SendMessage`, which is asynchronous.
+From there it could only poll, and every poll is a stop.
+
+`stallCount` reached **3 of `stallBlockAt: 5`**, and the ladder was already telling the director to
+*"stop delegating… decide whether the approach is wrong"* — to kill a coordinator that was working.
+
+**Fix.** A registry of live subagents, written on `SubagentStart`/`SubagentStop` for every agent
+(§T1) before any filter. When the director stops with a live child it is still **blocked** — nothing
+else would wake it, since the main thread is notified about its own dispatch and not about a
+grandchild — but the block costs no continuation and no stall sample.
+
+Two bounds keep that from becoming a silent hang:
+
+- Entries **expire** after `CHILD_STALE_MS` (1 h). A crash, an API error or an abort leaves no stop
+  event, and all three are in run 6's record. The bound is measured: the longest-lived subagent
+  observed is 36 min, and the longest a *working* agent went without writing a message is 17.7 min.
+- Every path that cannot produce positive, fresh evidence returns **fewer** children — an unreadable
+  transcript directory, a missing meta, an expired entry. Fewer children means the director is
+  re-driven, which is the behaviour that already existed. Nothing here can invent a wait.
+
+Rejected: allowing the stop. It idles the director with nothing to wake it.
+
+**Waiting needs its own counter, and the first version did not have one.** The harness honours only
+8 *consecutive* blocks (§R6: 9 invocations, 8 honoured), and run 6's director polled ~12 times in
+four minutes. An uncounted block therefore reaches the ceiling in under three minutes, the harness
+truncates the turn, and there is no `dispatch_exhausted`, no `SUSPENDED`, and `yielded` is still
+false because the last decision was a block — so the main thread's Stop *allows* and the run goes
+silently idle. That is §S2's defect restored, arriving sooner. A long wait now yields **resumably**
+at the same soft cap, which restarts the harness's series, while `directorTurn.blocks` — the budget
+for doing work — stays untouched. The two counters measure different things and reset each other.
+
+The block message no longer prescribes a shell wait loop. It described one specific command, and an
+instruction an agent may be unable to execute is exactly §S18's defect; the mechanism above is what
+carries correctness, so the text only states the principle.
+
+### S16. One run, one director — prevention to pair with §S13's detection
+
+Run 6 grew **two** impostors, and the depth guard shipped for §S13 only sees one of them:
+
+| agent | depth | parent | how |
+| --- | --- | --- | --- |
+| `ac42a950912929640` | 3 | `opus-review-adjudicator` | the adjudicator has `Agent` legitimately, to escalate, and read "reply to the director" as "dispatch the director" — 34 requests, **$4.37**, drove the run's continuations for four minutes |
+| `aff603ff8af9a46ac` | 1 | MAIN | the main thread used `Agent` where its own skill says `SendMessage`; self-corrected via `TaskStop` after 10 s |
+
+The second is a *depth-1* director. Depth cannot see it; multiplicity can.
+
+`PreToolUse` carries no `agent_id` (§D5) *(corrected: see §V3 — it does, for a subagent caller)*, so
+the hook cannot ask **who** is dispatching — and does
+not need to. It asks whether anyone is already driving: `directorIsDriving(state)` is true when an
+agent id is recorded and `yielded` is not set. A request for a second director is wrong whoever
+makes it.
+
+The legitimate first dispatch is never seen: `/hyperpowers:feature` dispatches the director and the
+**director** then creates the run, so no run is bound and the hook has already returned (run 6:
+`Agent` at 01:28:03, `run_started` at 01:28:18). `/hyperpowers:resume` sets `yielded`, which is the
+documented release valve when a director is genuinely dead.
+
+**This rule fails open**, unlike the Git classifier it shares a hook with. Missing an impostor costs
+one wasted agent that the depth guard then ignores; a false deny costs the plugin its only entry
+point.
+
+### S17. A review is a verdict on a version, not on a filename
+
+| at | what |
+| --- | --- |
+| 02:06:45 | design-2 review completes — `gpt-5.6-luna` @ xhigh, *concerns*, DESIGN-003, **0 blocking** |
+| 02:08:08 | `design.md` modified — the remediation resolving DESIGN-003 |
+| 02:09:27.476 | DESIGN_REMEDIATION → DESIGN_REVIEW_2 |
+| 02:09:27.526 | DESIGN_REVIEW_2 → DESIGN_LOCK — **50 ms later**, no pack, no Codex call |
+| 02:09:48 | design gate: **11/11 passed** |
+
+The locked design is not the reviewed design. **This is permitted**: §18 mandates a further round
+only when round 2 raises a *new blocker*, and DESIGN-003 was non-blocking. The gate was implementing
+the contract faithfully.
+
+What was missing is that nobody could see it. `checkReviewCycle()` asserted only that a review
+existed, was `completed`, and had its findings adjudicated and resolved — so "a review exists" and
+"a review *of this text* exists" were the same check, and the gate could not tell a two-line
+correction from a rewrite. `gateInputDigest` does hash `design.md`, but only to invalidate a verdict
+between the gate and the transition; it cannot see that the review predates the edit.
+
+**Fix.** `reviewedArtifactDigest()` is recorded in the review when it is written and compared at the
+gate. A mismatch is `unverifiable`, not `fail` — the status the gate already tolerates and reports as
+stated residual risk, which is exactly §18's semantics. Failing hard would force a Codex round onto
+every typo fix. The `implementation` rounds record no digest and report *not applicable*: what they
+review is the working tree, which moves between rounds by design, so the check would fire always and
+mean nothing.
+
+### S18. The phase table told the director to do the user's job
+
+`SUSPENDED.next` read *"Run `/hyperpowers:resume` to continue this run in a fresh turn."*
+`nextAction(phase)` is injected **verbatim into the director's context** on every continuation
+(§S8), so that was an instruction to a model. Unable to run a slash command, the director found the
+script behind it and called `resume-run.mjs` directly — twice in run 6, **16 and 35 seconds** after
+the suspension (02:09:31 → 02:09:47, 02:24:08 → 02:24:43).
+
+So `SUSPENDED` was not a circuit breaker: the state entered to stop a runaway loop was being cleared
+by the runaway loop, on the system's own advice. The user never typed `/hyperpowers:resume` — the
+main transcript contains exactly two user commands, `/hyperpowers:feature` and `/hyperpowers:abort`.
+
+The text now names the user as the one who resumes and tells any agent reading it that this is not
+its job. **What cannot be fixed** stays stated: nothing distinguishes a human's resume from an
+agent's, for the same reason as §S14 — no hook sees an `agent_id` on a tool call
+*(corrected: see §V3 — a subagent-issued call carries one; a human's `/hyperpowers:resume` still does
+not, so this conclusion is unchanged)*. Removing the
+instruction removes the *cause*; it does not create an actor check.
+
+### S20. `state.schema.json` described a state that had stopped existing
+
+Found by reading the tree, not a run. The schema carried no `directorTurn` — added with §S5 and
+written by every run since — and **nothing validated a state against it**. A schema no code reads is
+not a contract; it is a comment that ages, which is this repository's signature defect wearing a
+`.json` extension.
+
+It now describes `directorTurn` and `children`, and three tests hold it there: a fresh `newState()`
+validates, a *driven* state validates (the accumulating fields are the ones a fresh state cannot
+exercise), and every key `newState()` writes must appear in `properties` — so the next field added
+to the run fails the suite rather than quietly escaping the contract.
+
+### T3. Tool schemas cost prefix tokens, exactly additive — **MEASURED**
+
+`EXP` — two agent definitions with **byte-identical bodies**, same model, same effort, same
+dispatch prompt, differing only in frontmatter, dispatched from one session:
+
+| agent | `tools:` | prefix at first request |
+| --- | --- | ---: |
+| `bench-all` | *(absent — inherits everything)* | **19,986** |
+| `bench-dir` | `Agent, Bash, Read, Write, Skill` | **17,703** |
+| `bench-noagent` | `Bash, Read, Write, Skill` | 14,968 |
+| `bench-noskill` | `Agent, Bash, Read, Write` | 12,347 |
+| `bench-few` | `Read, Write, Bash` | **9,612** |
+
+The attribution is **exactly additive**, which is what validates it: `9,612 + 2,735 (Agent) +
+5,356 (Skill) = 17,703`. Those two schemas are catalogues — every dispatchable agent, every
+available skill — and they are the two the director genuinely needs.
+
+**The first estimate was wrong by 4.5×.** A three-tool benchmark suggested 10,374 tokens of saving;
+the director's real list saves **2,283**, worth ≈$0.25 a run. It ships because it is certain and
+riskless, not because it is large. `Skill` was verified still working under an enumerated list
+before the change landed — a director that cannot invoke `superpowers:brainstorming` dies at phase
+three, which would have cost a run to save a dollar.
+
+Dropping `Skill` (5,356 tokens) was considered and refused: the plugin declares a dependency on
+superpowers, and trading a declared contract for $0.40 is the wrong direction.
+
+**The caller count has since fallen from two to one.** `Skill` was kept for
+`superpowers:brainstorming` *and* `artifact-design`; §S37 removed the second, because the product
+diagram is now a Markdown page with a ` ```mermaid ` fence rather than a hand-designed HTML document.
+The conclusion is unchanged — brainstorming is a declared dependency and phase three dies without it —
+but anyone re-weighing this trade-off should see one caller, not two.
+
+The objection this overturns was recorded in the file itself: *"an enumerated list would silently
+remove a capability the moment a phase needed one nobody thought to write down."* It is answered,
+not overruled — `Bash` subsumes `Grep`, `Glob` and `find`, `Write` subsumes `Edit`, and web access
+belongs to `sonnet-researcher`. The list removes schemas, not reach. Run 7 used four of the five as
+a subagent; `Read` is on the list because run 3's director used it and because it is the natural
+fallback, not because run 7 needed it.
+
+### S24. Three optimisations investigated and refuted by measurement
+
+Recorded because the reasoning is the reusable part, and because each looked plausible enough to
+ship without checking.
+
+- **Bounding what coordinators return.** Their reports are 3.5–4.3 kB of dense, path-bearing
+  evidence. The one outlier is `sonnet-researcher` at 11,845 characters — but the researcher has
+  **no `Write` tool**, so its report exists only in the director's context, and the director is
+  required to carry it forward verbatim precisely because compressing it once cost *17,000 Opus
+  tokens rediscovering 6,000 tokens of Sonnet work*. Refuted by its own history.
+
+- **Compact receipts from implementers to the execution coordinator.** Its two cold restarts cost
+  $1.11, so the lever looked worth up to that. Measured: implementer returns across three dispatches
+  total **6,971 characters** — ~2k tokens, worth about $0.03. The coordinator's ~89k context is its
+  *own verification work*: `Bash`×16 and `Read`×7 reading the diff and running the suite. Shrinking
+  it would weaken verification to save nothing.
+
+- **Parallel work packages.** Run 7's three packages ran strictly sequentially, 18.7 min for 16 min
+  of work, and both coordinator definitions already carry the instruction to dispatch waves in a
+  single message. The chain is real: the coordinator verified and accepted WP-001 before dispatching
+  WP-002, which *tests WP-001's code*, and WP-003 exports its module. Run 3 was sequential too, and
+  looser — overlap 0.43× against run 7's 0.86×. Forcing a wave would break a dependency the work has.
+
+### S25. Uninstalling the plugin destroys every run's artefacts
+
+`claude plugin uninstall` removed `~/.claude/plugins/data/hyperpowers-hyperpowers/` wholesale,
+taking run 7's `state.json`, `telemetry.jsonl`, `design.md`, `plan.md` and `tasks.json` with it —
+during a routine version bump. The run's analysis survived only because it had already been
+extracted, and because session transcripts live under `~/.claude/projects/`, outside the plugin's
+data directory.
+
+The record of the work is the product's memory, and a reinstall erases it silently.
+
+**Decision, not a caution: out of scope, and here is why.** `dataRoot()` resolves beside the
+harness's own plugin data precisely so that hooks and Bash-invoked CLI scripts agree on one
+directory; §O1 is the run where they did not, and the plugin governed nothing while looking healthy.
+Moving run data outside that directory reopens the worst defect this project has had, to protect
+against an operation the user performs deliberately. The cheaper half-measures were considered and
+rejected too: writing the report into the project violates §20 (run data must never enter the diff
+the reviewer sees), and a preflight warning fires *after* the loss. Archive a finished run's
+directory before uninstalling; that is the whole mitigation, and it is honest to say so.
+
+### S26. The stateless-director envelope, recomputed
+
+The one lever large enough to matter, still untested, and its numbers move with §T3.
+
+The director's prefix is now **19,188** tokens (21,471 less the 2,283 §T3 removed). Six restarts
+writing only that prefix cost `19,188 × 6 × 1.25 × $10/M` = **$1.44**, against the **$4.83**
+measured — an envelope of **≈$3.4 gross**, ≈$3.1 net of what §T3 already banked.
+*(stale sizing: see §V9 — the prefix is not what a cold turn rewrites. On run 9 the mean rewrite is
+~86k tokens across 17 windows, so the envelope is several times this.)*
+
+It is an envelope, not a plan, and two things gate it. First, whether a director whose memory is the
+run directory rather than its conversation still *directs* — that is a quality question no
+arithmetic settles. Second, the validation an adversarial review proposed for it — replay the
+recorded `DESIGN_LOCK` and `FINAL_ACCEPTANCE` decision packets through fresh pinned directors and
+compare verdicts before committing to a full trial — **cannot be run against run 7**, because §S25
+destroyed those packets. The next run must archive its run directory before any reinstall, or this
+stays unmeasurable.
+
+### S21. Publishing is an errand for the main thread, exactly as asking is
+
+Run 7 finished with a product diagram nobody saw. The director called `Artifact` itself at 14:07:11,
+got a valid `claude.ai` URL, recorded it as `state.artifacts.diagramUrl`, and condition 14 passed —
+while the main thread made **exactly one tool call in the entire run**, the opening dispatch. It
+never had anything to present, so no page opened.
+
+This is §R1's shape a second time. The harness removes `AskUserQuestion` from subagents because
+reaching the user belongs to the main thread; publishing is the same job under another name, and the
+gate could not see the difference because it checks the record, not that a human saw anything.
+
+It cannot be tidied up after the fact either: a finished run refuses further writes (§S14), so the
+URL has to be recorded *before* `COMPLETE`. So it parks mid-run exactly as a question parks —
+`publish-request` writes the errand, the `SubagentStop` controller **allows** the director's stop,
+the `Stop` controller **blocks** the main thread with the file and the title, and `published`
+records the URL and releases the run.
+
+Both controllers read one predicate, `pendingErrand`, rather than each testing for its own kind:
+getting the allow/block polarity backwards on either side strands the run, and two copies of that
+rule is one copy that gets fixed.
+
+## U. Second-pass review of the run-8 change set
+
+Everything in this section was found by re-reading the 53 staged files as a stranger would, plus two
+scoped adversarial passes by Codex over the control loops and the gate layer. It is grouped because
+the findings share one shape, stated once here: **a guarantee written in a comment and implemented in
+some of the places it names.** Every entry below has a regression test; the section numbers are what
+those tests cite.
+
+### S27. The review pack withheld a clause three different ways
+
+`interfaces` and `constraints` were simply absent from the work-package rendering — §S22 recorded
+that, and run 8 measured the fix working (plan round 1 found 5 findings against run 7's 2, on exactly
+those clauses). The fix introduced two more:
+
+| defect | effect |
+| --- | --- |
+| `t.scope?.may_read` | the schema field is `read_only_context`; `may_read` exists nowhere in the repository, so the row rendered `(none)` for every package in every plan review |
+| `scope.files` unrendered | required by the schema and read by *both* `validate-agent-report` and `verify-completion` as part of the ownership set |
+| `commands.join(' && ')` | **manufactured** the property the reviewer is asked to check |
+
+The third is the interesting one. Run 8's longest-surviving blocking finding — accepted, remediated,
+and still defective when round 2 looked again — was a verification command chained with `;` instead
+of `&&`, so it exited successfully after a check failed. This renderer would have shown a reviewer
+the fail-closed version of exactly that. Commands now stand one per line, verbatim.
+
+The doc block also claimed the table was "rendered generically from the schema's field list", which
+was false. The table is hand-written, because the labels and shaping are editorial; what makes it
+trustworthy is a test that fails when a schema property is neither rendered nor named in
+`NOT_REVIEWED` with a reason, and when a populated field does not survive rendering.
+
+### S28. `adjudication` double-counted, the same disease as §S22 one verb over
+
+**17 `adjudication` events for 14 distinct findings** in run 8 — recounted from `run8-archive/`, which
+is why this number is one higher than the figure quoted while the run was live. Round `plan-2` emitted
+6 for 3 — the
+same three, recorded twice, two minutes apart. §S22 diagnosed this on `resolve` and fixed that verb
+only, without asking whether its neighbour had it too.
+
+The *record* was correct both times: `record` replaces a round's decisions wholesale and `resolve` is
+idempotent in state. Only the journal over-counted, and the journal is what anyone measuring the run
+reads. `cmdRecord` now distinguishes a first decision from a re-decision and emits
+`adjudication_decision_replaced` for the latter — same discipline as `policy_blocked` versus
+`policy_violation`, for the same reason: telemetry is append-only, so a conflation cannot be undone.
+
+`summarise()` folds both event names by `round:finding`, last decision winning. Counting entries had
+reported a finding accepted *and* rejected when it was reconsidered once, and counted it twice when
+it was not.
+
+### S29. A failing gate closed the only road back
+
+`transition()` checks the **source** phase's exit gate before allowing any edge out of it. Every
+gated phase also declares a recovery successor, and each exists for exactly one situation — the gate
+said no — so in exactly that situation none of them was reachable:
+
+| phase | recovery edge | reachable with the gate failing |
+| --- | --- | --- |
+| `DESIGN_LOCK` | → `DESIGN_DRAFT` | no |
+| `PLAN_LOCK` | → `PLAN_DRAFT` | no |
+| `FINAL_ACCEPTANCE` | → `IMPLEMENTATION_REMEDIATION`, `SYSTEM_VERIFICATION` | no |
+
+`FINAL_ACCEPTANCE` is where it bites hardest. The director's three answers are COMPLETE, REMEDIATE
+and BLOCKED; a failing completion gate refused COMPLETE (rightly) *and* both REMEDIATE edges, leaving
+only BLOCKED — which is terminal. A run one fixable finding from success could only be declared
+insoluble.
+
+The rule is derived from `PHASE_ORDER` rather than declared: a forward edge must prove the phase it
+leaves, a backward edge **is** the redoing. No gate is escaped, because coming forward again
+re-checks every gate on the way; the only thing a backward edge buys is the work. Derived rather than
+listed because a second list of "recovery edges" is a second thing to keep in step with `successors`.
+
+### S30. The working-tree fingerprint skipped the files Git is not tracking
+
+`gitSnapshot()` was `git status --short --untracked-files=all` plus `git diff HEAD`. Neither carries
+the *contents* of an untracked file: `status` prints its path, `diff HEAD` omits it entirely.
+
+That is the normal case here, not an edge case. The user performs every Git operation themselves, so
+a feature's new files stay untracked for the whole run — run 8's entire deliverable was two of them.
+So the completion gate's freshness binding did not cover the primary artefact: a passing verdict
+survived replacing the whole feature with broken code, as long as the filenames held.
+
+`git hash-object --stdin-paths` now hashes them in one Git process — no argv limit, no file contents
+crossing the boundary, and the blob ids move exactly when the bytes do.
+
+The per-call timeout came down from 30 s to 5 s in the same edit. `checkGate` runs inside the
+`SubagentStop` controller, budgeted at 20 s and killed by the harness at 30, and `execFileSync` blocks
+the event loop — so three calls at 30 s could reach 90 s, `onError` would never run, and a fail-open
+hook that cannot reach its own failure path is not fail-open.
+
+### S31. Six checks that could not fail
+
+| condition | claimed | actually tested |
+| --- | --- | --- |
+| `gate:plan` freshness | bound to what the gate read | `planGate` reads `budgets.maxFilesPerWorkPackage`; the plan digest hashed no config |
+| stored verdict binding | "the state it judged" | digest computed from the state `mutateState` *reloaded*, not the one evaluated |
+| `13.11-no-git-mutation` | no mutation executed | read only the `policy_violation` event, while `git-guard` also writes `state.gitDrift` durably — and `logEvent` swallows a failed append by design |
+| `resolved-<round>` | open obligations discharged | filtered on `accepted` only, while the ledger puts `needs_evidence` and `escalated_to_fable` in `REQUIRES_RESOLUTION` too |
+| `13.10-no-out-of-scope-changes` | scope drift | `changedFiles()` returned a partial list when one of two Git queries failed (`&&` where `\|\|` was meant) |
+| every package accepted | EXECUTION's exit requirement | checked once on the way out; nothing stopped `task --status pending` afterwards, and completion read `tasks.json` only for ownership |
+
+Two adjacent holes closed with them. `resolve` could close an `escalated_to_fable` finding with any
+ten-character string — so the coordinator that escalated a *blocking* finding could close it with
+"escalated to the director as agreed", the blocker left `openBlockers`, and the director never
+decided; it is now refused, and the message names the replacement decision as the way to close it.
+And `count` accepted any counter name: `--counter codexInvocation` reported success, minted a dead
+field and left the real counter untouched. The settable names are derived from
+`state.schema.json`'s integer counters, and `--by` must be a whole number, because `9 > "seven"` is
+`false` and a `NaN` counter is a bound nothing can satisfy.
+
+### S32. An errand is a fact on disk, so it outlives being mentioned once
+
+`Stop` consumed `directorTurn.yielded` **before** checking for a pending errand: it cleared the flag,
+blocked once with the relay instruction, and from then on the flag was false, so the very next
+attempt to end the turn was allowed. A run with an unanswered question and no running director was
+abandoned in silence, with nothing left that could wake it.
+
+"Told once" is the right bound for the *generic* nudge, because "the director is idle" is an inference
+and §S12 is what over-trusting it costs. An errand is not an inference: `askedAt` without its
+completion stamp is a file saying the run cannot move without this thread. It is checked before the
+flag, it keeps blocking while it stands, and it is **counted**.
+
+The counter had the defect §S26b describes below, in the other loop: the errand branches returned
+before reaching it, so those blocks spent the harness's ceiling without being counted, and nothing
+reset it on an allowed stop — so a thread that alternated block, allow, block accumulated towards
+`SUSPENDED` for blocks the harness had already forgotten.
+
+### S26b. Two counters, one harness ceiling — measured at 12 against 8
+
+The `SubagentStop` controller gave waiting its own counter, on the argument that waiting on a delegate
+should not spend the dispatch's budget. The harness does not share that view: it honours 8
+**consecutive** blocks (§R6) and never asks which branch emitted them. Two counters each yielding at
+the soft cap of 6 therefore permitted 2×6 blocks, and alternating the two things a healthy director
+does — dispatch, wait for the child, dispatch again — produced exactly **12 consecutive blocks
+against a ceiling of 8**, reproduced in the suite before the fix.
+
+The four past the line are dropped. At that point the last decision was a block, so `yielded` is
+false, the main thread's `Stop` hook allows, and the run goes idle without a word: §S2's defect,
+reached through the branch written to prevent it.
+
+One counter now, resetting on every yield, because that is what the harness models. What waiting is
+exempt from is the **stall** budget — run 6 reached 3 of the 5 samples that move a healthy run to
+`BLOCKED` by polling a coordinator that was working — and it stays exempt, because that branch returns
+before `recordStall`. Cheap and free are different claims and only one of them was ever true; the
+director-facing message said both.
+
+### S33. Three guards that could not see what they claimed to
+
+- **The fail-closed hook failed open on a corrupt state.** `policyApplies()` returned inactive for
+  *any* unreadable `state.json`, so a truncated write or an unsupported `schemaVersion` released
+  `git commit`, `.git/` writes and the `Workflow` tool — in the one hook whose contract is that
+  anything unclassifiable is denied. A bound run whose phase is unknown is the unclassifiable case.
+  **Absent** state is not symmetric and stays permissive: `claude plugin uninstall` deletes the whole
+  data directory (§S25) while the session binding survives, and holding the user's Git hostage to a
+  reinstall is the wrong failure.
+- **The one-director rule was inert for most of a run.** `directorTurn.agentId` was written only when
+  the director *stopped*, so through the whole of phase one — the longest single stretch —
+  `directorIsDriving()` read false and a coordinator dispatching a second director was allowed. It is
+  now written on the director's `SubagentStart`, which is also where a fresh dispatch's block series
+  correctly starts at zero.
+- **Two readers of "who is the director" selected differently.** `subagent-controller` ignores any
+  candidate not at depth 1; `directorSubagent()` took the newest matching `agentType` at any depth —
+  and run 6's impostor at depth 3 was the most recently written meta for four minutes, so the
+  completion gate would have reported its depth, model and effort as the run's. Now ranked: depth 1
+  first, then no recorded depth (metas predating the field — no evidence either way), then a depth
+  known to be wrong. The last rank still *answers* rather than returning `null`, because the gate
+  prints the depth and silence would hide the impostor instead of naming it.
+
+### S34. Fourteen doc blocks detached from what they document
+
+Detected mechanically — a `*/` followed by another `/**` with no declaration between — then verified
+by hand, across nine files. Two shapes: a doc orphaned above a later insertion, and two stacked docs
+for one declaration. `lib/state.mjs` alone had five; it documented `liveChildren` above
+`reviewedArtifactDigest`.
+
+Recorded because in this repository the comments *are* the design record, so one attached to the wrong
+function is misinformation rather than untidiness. The two remaining adjacent pairs
+(`lib/telemetry.mjs`, `lib/validate.mjs`) are module headers followed by a declaration's own doc and
+are correct.
+
+### S36. §18's extra round should stay optional. The cheaper branch had no mechanical form.
+
+The open question after run 8 was whether §18's extra review should become **mandatory** once round 2
+raises blocking findings. Three artefacts across runs 7 and 8 were locked after their last review,
+every gate reported it, every gate passed, and `extraReviews: {}` both times.
+
+Run 8's archive answers it, and not the way the question was framed. The gate's own text offers a
+choice — *"State the change as residual risk, or run an extra round"* — and run 8 recorded **four**
+residual risks:
+
+| # | source | about |
+| --- | --- | --- |
+| 1 | `DESIGN-002` | a `Proxy` over an array satisfies §3.4 structurally and can answer differently on two reads |
+| 2 | `PLAN-004` | AC-44's interleaving clause has no discriminating test |
+| 3 | `PLAN-006` | AC-44's state clause is undecidable by command without an AST |
+| 4 | `IMPL-001` | `scratch/verify-wp001.sh` hardcodes a pre-feature test count of 14 |
+
+Every one is a *finding* the director would have recorded anyway. **Not one cites the drift.** So
+neither branch of the disjunction was performed: not the extra round, and not the statement either.
+The run finished on a claim the contract had already described as needing to be written down
+somewhere.
+
+That is not §18 being too permissive. §18's optionality is correct, and §S17 records why: failing on
+the drift itself would force a Codex round onto every typo fix, and a check that fires on every
+healthy run carries no signal. The defect is that the *cheaper* branch had no mechanical form, so it
+read as free — the same shape as everything else in this section, one level up: a guarantee stated in
+prose and enforced nowhere.
+
+`risk --add --source` already existed. The gate now raises `unverifiable-stated`, which fails while an
+offer stands undischarged and names the exact command. It is scoped to the conditions that *make* the
+offer — registered at the line that prints it — because most `unverifiable` statuses mean the
+environment could not answer (no runtime check declared, Git unavailable, a review predating the
+digest field), and asking for a residual risk about "Git could not be queried" is the noise this
+avoided in the first place.
+
+Cost to a healthy run: one command, when an artefact was edited after its last review. Cost to a run
+that does neither: it does not pass, which is what the contract said all along.
+
+**Replayed against the run-8 archive** with all of §U's tightenings applied: design 11 pass / 1
+unverifiable, plan 16 / 1, completion **22 pass, 0 unverifiable, 0 fail** (21 before — the new
+`packages-accepted` is the extra). No condition flipped to a failure, so these closed holes rather
+than inventing a gate nobody can pass. Run 8 would now additionally have had to write two residual
+risks citing the two drifted artefacts.
+
+### S37. Where run 8's 234 minutes went, and the one phase that is not adversarial work
+
+**Provenance.** Run 8's column is re-derivable: `run8-archive/` preserves `telemetry.jsonl`, so every
+figure below is a timestamp difference over 19 `transition` events. Run 7's is **not** — `claude plugin
+uninstall` deleted its run directory (§S25), so its numbers are the ones extracted before the deletion
+and cannot be recomputed. They are quoted, never used as a denominator.
+
+Run 8, minutes per phase:
+
+| phase | min | | phase | min |
+| --- | ---: | --- | --- | ---: |
+| INTAKE + BRAINSTORMING | 4.1 | | EXECUTION | 29.1 |
+| DESIGN_DRAFT | 9.6 | | SYSTEM_VERIFICATION | 10.2 |
+| DESIGN_REVIEW_1 | 3.9 | | IMPLEMENTATION_REVIEW_1 | 4.2 |
+| DESIGN_REMEDIATION | 17.3 | | IMPLEMENTATION_REMEDIATION | 18.8 |
+| DESIGN_REVIEW_2 | 15.8 | | IMPLEMENTATION_REVIEW_2 | 3.1 |
+| PLAN_DRAFT | 17.9 | | **FINAL_ACCEPTANCE** | **50.6** |
+| PLAN_REVIEW_1 | 4.8 | | *the two LOCK phases* | *0.5* |
+| PLAN_REMEDIATION | 18.2 | | | |
+| PLAN_REVIEW_2 | 24.6 | | | |
+
+Grouped: **everything before the first line of code, 117 min (50 %)**; execution and verification 39
+min (17 %); post-code adversarial review 26 min (11 %); `FINAL_ACCEPTANCE` 51 min (**22 %**). The
+three remediation phases alone are 54 min (23 %) and they track findings, which is the architecture
+doing what it is for — the biggest of them follows `plan-1`'s five findings.
+
+The outlier is `FINAL_ACCEPTANCE`, and it is the one phase with no adversarial content at all. The
+gate is a script, the report is a script; both run in seconds. Its only *authoring* task is the
+product diagram — and run 8 produced **8,609 bytes of hand-designed HTML** (palette, dark-mode media
+queries, its own `<!DOCTYPE>`, `<html>` and `<head>`, which the publisher then wraps a second time)
+around a **361-byte** Mermaid diagram.
+
+Artifacts render Mermaid natively from a ` ```mermaid ` fence. So both instruction sites now ask for a
+short Markdown page — title, fence, two or three sentences of what it means. The diagram is the
+deliverable; the chrome is not, and this is the rare saving that costs nothing in quality, because the
+artefact that reaches the user is identical.
+
+Attribution bound, stated because §S24 exists: the phase was 51 minutes and the page is its only
+authoring work, but nothing measures how much of the 51 the page took. This is a hypothesis with a
+mechanism, not a measured saving, and run 9's `FINAL_ACCEPTANCE` duration is the test.
+
+Run 7 versus run 8, quoted:
+
+| | run 7 | run 8 |
+| --- | --- | --- |
+| duration | 125 min *(quoted)* | **234 min** *(re-derivable)* |
+| cost | $27.93 *(quoted)* | **$51.77** *(quoted — the transcripts are outside the archive)* |
+| findings / blocking | 5 / 2 *(quoted)* | **17 / 11** *(re-derivable)* |
+| rounds returning `blocker` | 2 of 6 *(quoted)* | **4 of 6** *(re-derivable)* |
+| director cold restarts | 9 *(quoted)* | 12 *(quoted)* |
+
+Run 8 took 1.9× the time and found 3.4× the defects, 5.5× the blocking ones. The comparison is not a
+controlled one — different feature, different codebase — and the honest reading is the one §S24 already
+argues: **cost tracks findings to adjudicate, not feature size.** Run 8's four `blocker` verdicts
+produced three remediation phases totalling 54 minutes; run 7's two produced far less. That is the
+mechanism, and it is the mechanism working.
+
+### S38. The two run-8 events nobody had looked at — both mechanisms working
+
+- **`report_rejected`, 125.6 min, `WP-001`.** An implementer stopped with `WP-001` still
+  `in_progress` and no report submitted, so the `SubagentStop` validator blocked it once with §16.4's
+  reminder — the **first production firing** of a hook whose counter was declared and never
+  incremented for three runs. `WP-001` was subsequently accepted, so the one-shot reminder did exactly
+  its job. Not a defect.
+- **`redispatch_required`, 232.7 min, `blocks: 1`, `FINAL_ACCEPTANCE`.** The publish relay completed at
+  ~231 min; the director was resumed, stopped, and the main thread's Stop hook nudged it once. `COMPLETE`
+  landed 18 seconds later. One block, one nudge, one handover — the loop as designed, at the only
+  moment in 234 minutes it was needed.
+
+The third event in that window, `awaiting_delegate` at 229.7 min with two live `sonnet-verifier`
+children, was §S15's first production firing and is recorded in the run-8 notes.
+
+### S40. No hook observes the director's start — measured on run 9, aborted at 5 minutes
+
+`directorTurn.agentId` was `null` in `DESIGN_DRAFT` while the director was demonstrably alive: `children`
+held a depth-2 `sonnet-researcher` whose meta named its parent, and that parent's meta was
+`hyperpowers-director` at depth 1. So the registry write worked and the director-specific one had never
+run.
+
+**The ordering, which was already written down in this codebase.** `subagent-controller.mjs` opens with
+`if (!runId) return emitAllowStop()`. `/hyperpowers:feature` dispatches the director, and *the director*
+then runs `state-machine.mjs init` — so at its own `SubagentStart` there is no bound run and the hook
+returns before reaching §S33's registration. `git-policy.mjs` states exactly this: *"The legitimate first
+dispatch is never seen here: `/hyperpowers:feature` dispatches the director, and the director creates the
+run — so there is no bound run to be active, and this hook has already returned."* §S33 was then written
+one file over on the opposite assumption. **A director is first observable at its first stop**, and that
+is a property of the architecture, not a bug to be fixed by moving the guard: a hook that runs before a
+run exists has nothing to write to.
+
+Two consequences, both measured:
+
+- §S13's **prevention** half was inert for the whole of phase one — the longest single stretch of a run.
+  The `SubagentStop` depth guard still detected an impostor, which is ADR 0003's other half doing its job.
+- Every relay message fell back to `Agent → hyperpowers-director`, a **cold** dispatch, instead of
+  `SendMessage → <id>`. Run 8 spent **$15.48 — 30% of the run** — on Fable cache writes across twelve cold
+  restarts (§T2), so this is the dearest line in the bill, reached by an instruction.
+
+And a third, which is why the first fix did not hold either: `countBlock` was the only writer of
+`agentId`, and **the parked-errand and stop-allowed paths yield without counting**. So a run whose first
+stop is a park would never record its director at all — *inferred from the code, not observed*: run 9
+aborted in `DESIGN_DRAFT` and its `BRAINSTORMING` completed without parking, so no run has yet exhibited
+this. It is covered by a regression test that drives the park directly.
+
+**The fix is in two halves that have to agree.**
+
+1. One stamping site in `subagent-controller`, immediately after the director and depth filters, before
+   any branch — so no branch can skip it. A `SubagentStart` reaching there is a *re-dispatch* (the first
+   cannot), and a re-dispatch resets the block count because it starts a fresh harness series.
+2. `directorIsDriving(state, transcriptPath)` reads three things in a fixed order, and the order is the
+   design: **an explicit yield always releases** (`resume-run.mjs` sets `yielded: true`, which is how a
+   director that died without stopping stays replaceable — a fallback ignoring it would deny every
+   replacement for ever, worse than the hole); then a recorded id; then the meta files, via
+   `directorSubagent`, which now returns the `agentId` it always knew from the filename and ranks a wrong
+   depth last, so run 6's depth-3 impostor is not mistaken for the thing it impersonates.
+
+`PreToolUse` carries `transcript_path` (§D5), so `git-policy` can ask the same question during phase one.
+`stop-controller` resolves the id the same way, which is what turns the relay from a cold dispatch back
+into a resume — and its resolver carries its own `spawnDepth === 1` guard, tested, because naming an
+impostor to `SendMessage` would be worse than naming nobody.
+
+**One thing in run 9's final state I cannot account for, recorded rather than explained.** The archived
+state ends with `directorTurn.agentId = a28e41392808cb555`, `blocks: 0`, `yielded: true` — the id *is*
+there — while `telemetry.jsonl` holds only `run_started`, `preflight` and four `transition` events: no
+`continuation`, no `awaiting_delegate`, so `countBlock` (the sole writer in that build) never completed a
+call it logged. `observedDirectorModel` and `observedEffort` are set, so the director's `SubagentStop` was
+processed past the filters. There is exactly one director meta, written at 01:16:29 — nine seconds before
+`init` created the run — so there was no re-dispatch whose start could have registered it.
+
+The candidate explanations (a hook killed between its `mutateState` write and its `logEvent`; a start
+nobody observed) are speculation and are not recorded as findings. What *is* established is the direct
+observation this entry rests on: at `DESIGN_DRAFT`, read live, `agentId` was `null` while the director was
+running and had already dispatched two delegates. The restart will settle the rest — the monitor watches
+that field, and with the fix the id must appear at the first stop with a journal entry beside it.
+
+**One boundary left unverified, deliberately.** State's recorded id is preferred over the disk, so between
+a cold re-dispatch and that new director's `SubagentStart` the record names the *previous* agent. Whether
+`SendMessage` to an agent that has already returned fails loudly or silently does nothing is **not
+measured** — §S2 measured resuming a *parked* agent, which is the case the relay actually hits, and that
+works. Changing the resolution order on the strength of a guess is what §S24 records three refusals of, so
+the order stands and the gap is written down instead.
+
+**What run 9 did and did not establish.** It ran 4 minutes of phase one and aborted in `DESIGN_DRAFT`, so
+it validated §S19 (the harness loads the reviewed build) and found §S40. **Nothing downstream of phase one
+was exercised** — not §S26b's merged counter, §S29's recovery edges, §S30's untracked hashing, §S31's six
+conditions, §S36's discharge, nor §S27's review pack. Those remain tested by the suite alone, and the
+restart is their first real exposure, not a re-confirmation.
+
+**The monitor found this in two minutes, and also caught itself.** It had printed
+`PHASE PREFLIGHT → BRAINSTORMING` — an edge `canTransition` forbids and the machine never made; the record
+said `PREFLIGHT → INTAKE → BRAINSTORMING`. It was comparing what it happened to see between 30-second
+ticks. It now reads `state.history`, because a monitor that invents an illegal transition costs more than
+one that misses a legal one.
+
+### S39. Six defects found reviewing §U's own changes
+
+The third pass over the same code, with the diff read as a stranger's. Recorded because the pattern is
+now the point: **every one of these was introduced by a fix, and two of them are the very class that fix
+was closing.**
+
+- **A discharge with no version behind it lasted for ever.** §S36's citation was a token: state the
+  risk once, keep editing the artefact, and the gate stayed satisfied by a sentence describing a version
+  two edits ago. That is `gateInputDigest`'s invariant — a claim does not carry over to a state it was
+  not made about — missing from the mechanism written to enforce a claim. Now the statement's timestamp
+  is compared against the artefact's, from fields that already existed, and a stale one reads as
+  undischarged.
+- **The errand block instructed an action the Git policy denies.** Moving the errand check above the
+  `yielded` flag (§S32) made the message reachable while a director is still driving — and §S13's
+  prevention denies a second director dispatch in exactly that state. Blocked, obedient, denied, nowhere
+  to go. The last line is now conditional on `directorIsDriving`.
+- **The main thread's counter did not reset on the path a healthy run takes.** `countTurnBlock`'s own
+  doc said "reset on every allowed stop"; the *most-travelled* allow — every time the turn ends while
+  the director works — still used `emitAllowStop`. So the counter accumulated across separated series
+  and would have suspended a working run for blocks the harness had already forgotten. Caught by
+  reading the exits against the comment that described them.
+- **A suspension caused by an unrun errand did not name it.** Resuming clears the block count and not
+  the errand, so the user would have resumed straight back into the same wall.
+- **`packages-accepted` decided its status from its own message text**, after a first attempt that
+  wrote the same predicate three times. One predicate, named once.
+- **`asLines` joined with `'; '`.** Harmless until §S27 put `asBlock` beside it, at which point the
+  helper called "lines" was the one that did not produce any. Renamed `asJoined`.
+
+Checked and **not** defects, recorded so the next reader does not re-check them: `git hash-object
+--stdin-paths` un-quotes `core.quotePath` output, so §S30's untracked hashing is correct for paths with
+spaces and non-ASCII (verified against a `café file.mjs` fixture, identical blob ids either way); and
+`scripts/lib/git-policy.mjs`'s 20-line diff is comment relocation only, with no change to the
+classifier.
+
+### S35. Rejected after investigation
+
+- **"The added tests failed before the change" cannot fail.** True, and deliberate: absence of red
+  evidence is `unverifiable`, which the gate tolerates and stores by id for the director to state as
+  residual risk. Making it fail would block a run for evidence that is often genuinely unobtainable.
+- **The final report's regeneration is best-effort after a terminal transition.** The comment already
+  says so, and gives the reason: a stale document is better than refusing a legitimate terminal
+  transition.
+- **A second `SubagentStop` hook could consume the director's ceiling.** `validate-agent-report`
+  filters to agent types matching `/implementer/i` and returns an allow for everything else, so it
+  never blocks the director.
+- **Fallbacks counted from two sources.** `summarise()` reads both `fallback` events and the
+  `fallbacks` array on a transition. Only `codex-adversary` produces the event automatically, so a
+  double count needs an agent to also pass `--fallback` for the same occurrence. Left alone rather
+  than changing an accounting rule on an unmeasured producer.
+
+### S19. Run 6's economics, and where the money actually went
+
+$30.95 over 68 minutes, reaching `PLAN_DRAFT` with no plan review. Per agent, deduplicated by
+request (§P7):
+
+| agent | d | type | reqs | out-tok | $ | % |
+| --- | --- | --- | --- | --- | --- | --- |
+| `a0c5476…` | 1 | director | 75 | 27 696 | 13.37 | 42.4 |
+| `a724d17…` | 2 | opus-plan-coordinator | 43 | 73 259 | 4.86 | 15.4 |
+| `ac42a95…` | 3 | **impostor director** | 34 | 21 547 | 4.37 | 13.9 |
+| `a1888aa…` | 2 | opus-review-adjudicator | 40 | 46 327 | 3.92 | 12.4 |
+| MAIN | 0 | session relay | 81 | 23 644 | 3.54 | 11.2 |
+| `aa4229b…` | 2 | opus-design-coordinator | 8 | 28 357 | 1.12 | 3.5 |
+| `a6923ac…` | 2 | sonnet-researcher | 6 | 7 973 | 0.24 | 0.8 |
+| `aff603f…` | 1 | duplicate director | 1 | 152 | 0.10 | 0.3 |
+
+By family: **fable 56.6 %, opus 31.4 %, sonnet 12.0 %**. Fable takes 57 % of the bill for 21 % of
+the output tokens — it is the dearest tier and the loop made it take the most turns, which is §P8
+restated: the bill is context re-read, not generation.
+
+Roughly **$9 (30 %)** is attributable to the four control defects, and the direction of each bound
+differs: the impostor's $4.37 is a **ceiling** (some of it was legitimate adjudicator work routed
+through the wrong agent type), while the main-thread nag (~$3.2) and the post-abort work (~$1.6)
+are floors.
+
+**Evidence hygiene bound.** `hooks/hooks.json` and `stop-controller.mjs` were edited at 04:29 local
+while two agents were still alive (run ended 04:36), and hooks execute from `CLAUDE_PLUGIN_ROOT`,
+which was the working tree. Nothing about hook behaviour in the last seven minutes of run 6 is clean
+evidence. §S14 survives that bound — `verify-completion.mjs` was untouched until 04:54, well after
+the post-abort gate writes at 04:34 and 04:35.
+
 
 ## I. Accepted without independent verification
 
@@ -2256,3 +4076,452 @@ a release step, not a defect in the code.
 | --- | --- | --- |
 | `allowedAgentTypes` is ignored for nested subagents | §4.4 | Not verified. Mitigated exactly as the spec argues: Sonnet agents have no `Agent` tool (enforced by `tools:`, C1 caps depth anyway), all Git mutation is hook-blocked, and the ledger records every agent actually launched. Treated as telemetry, not a security boundary. |
 | CursorBench 3.2 score deltas | §7.2 | Unfalsifiable from here. The *economic* conclusion is independently recomputed in `docs/cost-model.md` from the harness's own pricing tiers (A4). |
+
+---
+
+## V. The adversarial verification campaign — 2026-07-30
+
+Twenty-two agents re-derived the release candidate's load-bearing claims from the archived runs and
+from the live binary, each rebuilding the arithmetic out of this repository's own
+`scripts/lib/transcript.mjs` so that grouping and pricing are the ones the plugin ships. The method
+check matters more than any total: recomputing §Q11 reproduces it to the cent — director $20.36,
+execution coordinator $17.02 over 92 turns, adjudicators $13.12 against the recorded $13.11,
+implementers $12.05, 71.9M cache reads, context 81.9% against the recorded 81.8%. Per-file sums
+equal `analyseTranscript`'s totals exactly, with zero cross-file `requestId` collisions, in every
+run. What follows is what did **not** reproduce.
+
+Nothing above this section is rewritten. Each falsified sentence carries a pointer to the entry that
+corrects it, because a measured row that quietly changes its mind is worth less than a wrong one
+somebody can still find.
+
+Read-only sources: runs #1/#2 `453e250d…`/`9c7f397b…`, run 3 `f4570451…`, §Q11's production run
+`22ac056c…`, run 8 `8e4ebe99…`, run 9 `d71c12b0…` (reached `COMPLETE`), run 9b `91004d07…` (wedged,
+aborted by hand), plus their archived run directories and the live binary at
+`~/.local/share/claude/versions/2.1.220`.
+
+### V1. Background dispatch was never enforced by the tool filter — **§S4 REFUTED**
+
+At 04:26:12.540Z run 9b's `hyperpowers-director` — `spawnDepth 1`, `callerModel claude-fable-5` —
+issued `Agent{subagent_type: hyperpowers:opus-review-adjudicator, run_in_background: true}`, and the
+harness answered at 04:26:16.512Z with **"Async agent launched successfully."** §R1's filter removes
+whole *tools*: `Workflow`, `TaskOutput`, `ScheduleWakeup`. `run_in_background` is a **parameter** of
+a tool the director must keep, and a `tools:` list cannot remove a parameter. Prevention that reads
+as mechanical because it is written next to something mechanical is exactly the recurring defect §U
+names.
+
+Run 9 — the run that reached `COMPLETE` — made 34 `Agent` calls, three of them backgrounded: the
+main thread's opening director dispatch, which is by design, and two at 13:08:43 and 13:57:23 from
+`opus-review-adjudicator` (depth 2) to `sonnet-implementer`. The consequence is visible in the same
+transcript. The only `tool_result` either backgrounded child ever returned to its dispatcher is
+"Async agent launched successfully"; the synchronous dispatch at 13:21:34 returned finished work at
+13:29:53. Both children did real work — 15 and 13 `Write`/`Edit` calls — and submitted no report
+through the state machine, and the parent executed a file its child was still writing (parent ran
+`tools/test-inventory.mjs` at 13:17:28 and 13:19:45; the child wrote fixtures through 13:18:52). No
+corruption or lost update was observed. The harness's own stated continuation path — "Use
+SendMessage with to: `<id>`" — is a tool no Hyperpowers agent has, and `TaskOutput` is stripped from
+every subagent, so a backgrounded child is unreachable by construction.
+
+Of the five agents whose `tools:` include `Agent`, three — `opus-review-adjudicator`,
+`opus-design-coordinator`, `opus-plan-coordinator` — carry no rule against backgrounding at all. The
+agent that broke the rule in the only completed run is one of them. Counting the sites is the fix
+that generalises; a fourth per-file regex is not.
+
+The enforcement surface exists and is unused: `PreToolUse` already matches `Agent`, and per §V3 the
+payload carries both `tool_input.run_in_background` and a caller discriminator.
+
+### V2. A subagent's model pin is third in precedence, not unconditional — **§S3 T26 mis-cited**
+
+Re-extracted from the live 2.1.220 binary, the subagent model resolver, verbatim:
+
+```
+l&&l!=="inherit"?[l,"env"]:r?r==="inherit"?[t,"inherit"]:[r,"tool"]:e&&e!=="inherit"?[e,"frontmatter"]:[t,"inherit"]
+```
+
+The labels `"env"`, `"tool"` and `"frontmatter"` are the harness's own. The resolver reads
+`CLAUDE_CODE_SUBAGENT_MODEL` first, then the per-invocation `model` argument, then the agent's
+frontmatter, then inherits. A second copy on the teammate-spawn path has the same order. So the
+precedence is **env > per-invocation > frontmatter > session default**: frontmatter holds against
+the *session default* only, which is the thing §S4 needed and all any run has ever exercised.
+
+T26 is titled "a subagent's `effort:` pin holds" and its table has three effort rows and no model
+row; §B4 is a load-time parse claim, not a precedence measurement. Eleven sites across docs,
+prompts, scripts and tests assert an unconditional **model** pin on T26's authority (§V11).
+
+*What is not shown.* No archived run demonstrates a per-invocation `model` beating frontmatter. Run
+9 carries exactly three `Agent` calls with a `model` argument — 15:26:06.157Z, 15:30:45.709Z,
+15:36:57.627Z, all from `opus-review-adjudicator`, all saying `"sonnet"` to agents that already
+declare Sonnet. Accepted, and non-divergent. The precedence is therefore a binary-read fact, not an
+observed inversion. The experiment that would settle it is one headless dispatch of a `model: haiku`
+plugin agent with `model: "opus"` passed per-invocation, reading `message.model` out of the
+resulting subagent transcript.
+
+*What actually holds the tier.* `directorTier()` reads the **observed** model from the director's own
+subagent transcript, so it detects an inversion whatever its source — frontmatter, `--model`, a
+per-invocation argument or the env var — and the PREFLIGHT transition guard plus completion condition
+§13.12b are the mechanical guarantee. Both archived runs recorded `claude-fable-5` against a
+configured `fable`. The honest statement is: **declared, and mismatch-detected before the first
+transition and again at the end**; not unconditional.
+
+`CLAUDE_CODE_SUBAGENT_MODEL` appears nowhere in this repository and `REQUIRED_ENV` is empty by
+design. Set in a user's shell it retiers every Hyperpowers agent, and only the director's model is
+ever observed. That is a documentation fact, not a reason to add an install step.
+
+### V3. `PreToolUse` fires inside a subagent, and the payload names the caller — **NEW, single configuration**
+
+`EXP` — a scratch project with `.claude/settings.json` registering a `PreToolUse` capture on
+`Agent|Task`, a `probe-parent` agent holding `Agent`, and one headless session told to dispatch it;
+the parent then dispatched `probe-child` with `run_in_background: true`. Capture 2, verbatim minus
+the prompt:
+
+```json
+{"session_id":"98977af8-…","transcript_path":"…/98977af8-….jsonl","permission_mode":"auto",
+ "agent_id":"a1cc388aa32480136","agent_type":"probe-parent","effort":{"level":"xhigh"},
+ "hook_event_name":"PreToolUse","tool_name":"Agent",
+ "tool_input":{"description":"Probe child ping test","subagent_type":"probe-child",
+ "run_in_background":true},"tool_use_id":"toolu_019d…"}
+```
+
+Three facts, each of which a rule can now rest on:
+
+- **`PreToolUse` fires for an `Agent` call issued from inside a subagent.** Corroborated in
+  production: run 9's director transcript (depth 1) and a `sonnet-implementer` transcript (depth 3)
+  each contain a `tool_result` beginning "Hyperpowers Git policy — DENIED."
+- **`tool_input.run_in_background` is present and readable**, which is what makes §V1's invariant
+  mechanical rather than asked for.
+- **`agent_id` and `agent_type` are present when the caller is a subagent and absent when it is the
+  main thread.** Capture 1 — the main thread dispatching `probe-parent` — reproduces §T1's key set
+  exactly, neither more nor less, which is what makes capture 2 a difference rather than a version
+  drift. `transcript_path` is the *main session* transcript in both, which is what makes
+  `directorIsDriving(state, transcript_path)` correct.
+
+*Scope, and it is narrow.* One probe: headless `-p`, project `.claude/agents` rather than plugin
+agents, depth 1→2, `permission_mode: auto`. **Not** measured for interactive sessions, for plugin
+agents, or for depth 2→3. §D5, §T1, §S14 and §S16 all state that `PreToolUse` carries no `agent_id`;
+that is now true of a *main-thread* caller and false of a subagent one. If the discriminator turns
+out not to generalise, a rule needing no caller identity is available and weaker: refuse
+`run_in_background: true` for any `subagent_type` that is not the director.
+
+§S14's larger conclusion survives untouched: knowing who issued a *tool call* still does not let any
+hook cancel an `Agent` call already in flight.
+
+### V4. "Tool calls per turn: 1.00" was an identity, not an observation — **§P8 and §Q13 corrected**
+
+`maxToolUseBlocksInOneRow` is **1** in all five runs examined: the transcript never writes two
+`tool_use` blocks into one row. So *blocks ÷ rows-containing-a-`tool_use`* is exactly 1.0000 for any
+transcript, forever. "No exceptions" was the tell. The provenance is confirmable arithmetically —
+run #1 holds 655 assistant rows and run #2 holds 760, and 655 + 760 = **1,415**, the denominator §P8
+states. This is §P7's row-versus-request defect, fixed for cost accounting and left standing in turn
+accounting, one metric over.
+
+Recomputed per API **request**, which is §P8's own stated unit ("a turn is one API round-trip"):
+
+| run #1 | run #2 | run #3 | §Q11 | run 8 | run 9 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.153 | 1.183 | 1.208 | 1.242 | 1.259 | 1.243 |
+
+Run #1 issued two or more tool calls on **47 of 321 requests** (37 × 2, 3 × 3, 7 × 4); run #2 has one
+request carrying eight. Agents batched on the very transcripts §P8 called unbatched. §Q13's follow-on
+— "1.00 to 1.22, mean 1.18 … so batching moved — a little" — inherits the same false baseline:
+nothing moved, the metric changed.
+
+**What survives:** batching independent calls is still right, still cheap, and still the thing every
+agent is told to do; the rule and its test stay. **What is withdrawn:** the sizing. "The largest
+saving still on the table" and "roughly a quarter of the bill" were computed against a baseline that
+never existed. The measured headroom is the distance from ~1.2 to whatever an agent can actually
+reach, and nobody has measured that.
+
+### V5. The dearest thing is a role's total turns across dispatches — **§Q11's agent-lifetime claim scoped to §Q11**
+
+| | execution coordinator | all implementers | director | adjudicator **role** |
+| --- | ---: | ---: | ---: | ---: |
+| §Q11 | $17.02 | $12.05 (6) | $20.36 | $13.12 (3 dispatches) |
+| run 8 | **$2.57** (24 turns) | **$3.97** (4) | $19.78 | $14.86 (5) |
+| run 9 | **$6.71** (39 turns) | **$6.88** (8) | $27.10 | **$33.55** (8) |
+
+§Q11 reproduces to the cent and does not replicate. In run 8 the coordinator cost 65% of the
+implementers it coordinated; in run 9 they are effectively tied. Only the **director** half
+generalises — $19.78 (38.5%) and $27.10 (29.6%) of those runs.
+
+The framing itself now misdirects. The largest line in run 9 is `opus-review-adjudicator` summed over
+its eight dispatches and 377 turns: **$33.55, 36.7%**, above the director — while no single
+adjudicator instance exceeds $7.51. "The longest-lived agent" points at a lifetime; the measured
+target is a **role's total turn count across dispatches**, which is a different optimisation and
+lands on a different agent.
+
+### V6. "Context re-read" is two terms, and the re-write is now the larger — **§P8 and §Q11 phrasing corrected**
+
+| | fresh input | cache **read** | cache **write** | generation | context |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| §Q11 | 0.0% | 49.4% | 32.5% | 18.1% | **81.9%** |
+| run 3 | 0.0% | 37.5% | 27.9% | 34.6% | 65.4% |
+| run 8 | 0.1% | **26.5%** | **46.9%** | 26.6% | 73.4% |
+| run 9 | 0.0% | **34.1%** | **42.3%** | 23.6% | 76.4% |
+
+"Context, not generation, is the bill" holds everywhere — 65–82% against 18–35% — and §Q11's number
+confirms on recomputation (81.9% against the recorded 81.8%). The **causal clause** is what is
+wrong. 81.8% is cache read *plus* cache write, and a cache write is not a re-read: it is paying
+1.25× to establish a cache after the previous one expired. On the two most recent runs cache write
+is the single largest term of four.
+
+The distinction picks the remedy, which is the only reason it matters. "Carry less context forward"
+addresses the read term. The write term is addressed by crossing fewer expiry windows, or crossing
+them at a cheaper tier — and §T2 already measured that the ~5-minute subagent expiry is a harness
+property nobody can remove.
+
+Where the write term comes from, measured on run 9's director and bucketed by the idle gap *before*
+each request: `< 1 min` read 3,205k · write 68k; `1–5 min` read 461k · write 144k; `5–15 min` read
+**0** · write 770k; `> 15 min` read **0** · write 699k. The boundary is sharp — a 293 s gap read
+27,718 tokens, a 356 s gap read zero and wrote 59,573. Exactly one `hyperpowers-director` meta file
+exists in run 8's and in run 9's `subagents/` directory, so the director was never redispatched; it
+was **resumed into an expired cache**. Control, and it is §T2's: §Q11's *main-thread* director held
+cache across 23 gaps of 5–15 minutes and one of 955 s, a write/read ratio of 0.03 against the
+subagent director's 0.46–0.64.
+
+### V7. Cost by function — production is a sixth of the bill, and the output-token band regulates a quarter of it
+
+| cost by function | §Q11 | run 8 | run 9 |
+| --- | ---: | ---: | ---: |
+| production — implementer, xhigh retry, test engineer, verifier | $14.16 **19.1%** | $7.75 **15.1%** | $15.91 **17.4%** |
+| adjudication | $13.12 17.7% | $14.86 28.9% | $33.55 36.7% |
+| coordination | $23.50 31.7% | $7.90 15.4% | $14.02 15.3% |
+| direction | $20.36 27.5% | $20.63 40.2% | $27.62 30.2% |
+
+Production is **15–19% of spend across three runs**. Output tokens are 23.6% (run 9) and 26.6%
+(run 8) of cost. So spec §6.2's band — Fable ≤ 10 / Opus 20–25 / Sonnet ≥ 65 percent of *output
+tokens* — regulates about a quarter of the bill, and it presumes that quarter is production work.
+
+Nothing is misrouted: every Opus dispatch is a role the spec's own table assigns to Opus. The pyramid
+inverted because judgment volume outgrew production volume — run 9 adjudicated 13 findings over 5
+rounds in 8 dispatches and 377 turns, against 8 work packages built. **The Opus-heavy split is
+neither an optimum nor an accident: it is the arithmetic consequence of pairing the spec's role
+assignment with a six-round review architecture.** The band is the wrong instrument for this shape,
+which is why `report.mjs` already renders it as orientation and why §Q11 reached the same conclusion
+from a single run.
+
+Retiering at observed token counts, run 9: the Opus roles moved to Sonnet save $19.02 (20.8%), of
+which the adjudicator is $13.42. **Not recommended on that arithmetic.** It holds token counts
+constant — the assumption `docs/cost-model.md` names as most likely wrong in the flattering
+direction — §S24 records three of three plausible savings dying on measurement, and the capability at
+risk is documented twice: §P4's adjudicator refusing to take Codex's word, reproducing the failure
+and finding it *broader*, and §Q11's rejecting a recommended fix **by executing it**.
+
+Two things measured alongside, both larger than the tier question and neither carrying a quality
+risk. Run 9's director spent **28 of 62 turns** invoking `state-machine.mjs` or `report.mjs` —
+$11.13, 40.7% of the director, 12.2% of the run, 8 of them cold at $8.13; run 8, 21 of 45 turns,
+$9.55, 47.7% of the director. Model judgment contributes nothing on those turns and each pays a full
+context re-establishment. And run 9 ran 13 gate events for 3 gates (the plan gate 9 attempts, 7 of
+them failing, three on the same condition within 14 seconds) and spent $10.14 (11.1%) on three
+adjudicator dispatches re-establishing verdicts a first dispatch had not recorded durably.
+
+### V8. Run 9b, minute by minute — every liveness protection is reachable only from a director's stop
+
+Measured from the archived run directory rather than from any report of it. Run start
+**01:37:47.760**; last forward transition `DESIGN_REVIEW_1 → DESIGN_REMEDIATION` at **01:53:26.107**,
+so the wedge begins at minute 16; `awaiting_delegate` at **04:26:18.985** (`DESIGN_REMEDIATION`,
+`blocks: 1`, children two `opus-review-adjudicator`); user `ABORTED` at **10:36:42.003**. Total
+**8h58m55s**, on ten lines of telemetry.
+
+Two circulating descriptions are imprecise, and both are corrected here rather than repeated. "No
+`SubagentStop` for ~4.5 h" is wrong twice over: **three `SubagentStart` hooks did fire during the
+wedge** — the children registered at 02:11:06, 03:54:08 and 04:26:16 prove `mutateState` ran — and
+the director emitted **exactly one `SubagentStop` in 8h59m**, at 04:26:18. The developer state
+report's "~460 min" is wrong too; measured elapsed is **538.9 min**.
+
+The two silent windows have different mechanisms, which is why one fix would not have covered both:
+
+- **01:37 → 04:26 (2h48m).** The director sat inside synchronous `Agent` dispatches, which produce no
+  stop at all. The hooks that did fire were children's, and they return immediately after the
+  registry write — before any liveness logic — so a live process holding the run at 03:54, with the
+  phase two hours old, computed nothing.
+- **04:26 → 10:36 (6h10m).** The director *did* stop; the controller saw two live children and
+  blocked it back into its own turn to wait. That window was entered by the director's **own**
+  `run_in_background` dispatch at 04:26:12 (§V1) — a claim the code did not enforce, sitting causally
+  upstream of the wedge.
+
+`state.stall` stayed `{signature: null, count: 0}` for nine hours: the detector never sampled once.
+`recordStall` and `liveChildren` have exactly one call site each, both below every early return in
+the director branch of the `SubagentStop` hook, and child-registry expiry is consulted only at a
+director stop — so all three entries expiring changed nothing, as the run's own findings file already
+recorded.
+
+**The honest ceiling.** No plugin surface can cancel or interrupt an `Agent` call in flight (§S14),
+and the settings allowlist a plugin may contribute is exactly `["agent", "subagentStatusLine"]`
+(§S9). **Automatic recovery from a wedged synchronous dispatch is not achievable by any measured
+mechanism in this repository.** What is achievable is detection plus a visible warning:
+`subagentStatusLine` ticks every 5 s whenever any subagent is live (§S9) — through run 9b's wedge,
+on the order of 4,400 ticks nobody was shown — and `state.updatedAt` is stamped by `saveState` on
+every mutation, so staleness is derivable without anyone remembering to write a heartbeat, which is
+the rule `progress.mjs` holds itself to. §S16 records the main thread stopping a stray agent with
+`TaskStop` after 10 s: the stop capability exists once somebody is told. The missing link is
+notification, not capability.
+
+Two bounds on that. `statusline.mjs` did not exist in the build that ran run 9b, so nothing here is a
+claim about a run it governed. And a clock-driven watchdog that *transitions* a run is the shape §S1
+already removed and must not be reinstated — reporting is the sanctioned form.
+
+### V9. Two sizings that measurement outgrew — **§T2 and §S26 stale**
+
+§T2 sized cold restarts from run 7 — 9 windows, 0.62M tokens, **$6.14** — and capped the recoverable
+part at "about $1.6". The same mechanism on run 9 is **17 windows and 1,469k tokens: $18.37** gross
+at 1.25 × $10/M, against $1.47 had those turns hit cache; run 8 is 12 windows, 867k tokens, $10.84
+against $0.87. §T2's *qualitative* conclusion is unchallenged and is precisely why the gross term is
+not the recoverable one: the expiry is a harness property, so the addressable fractions are the
+tier, the context carried across a window, and the number of windows crossed — 1 (run 3), 9 (run 7),
+12 (run 8), 17 (run 9).
+
+§S26 computed the stateless-director envelope from a **19,188-token prefix** and six restarts,
+≈$3.4 gross. The measured mean rewrite at a cold turn on run 9 is **~86k tokens**, with the last ones
+at 116–124k against 16k at dispatch. The envelope is larger than §S26 states, its two gates still
+stand, and one of them — replaying recorded decision packets through fresh pinned directors before
+committing to a trial — is now **runnable**, because run 9's directory was archived before any
+reinstall (§S25).
+
+### V10. What a dollar figure in this repository actually is — **§A4 does not cover the cache multipliers**
+
+All 2,178 assistant rows across run 9's session and its 34 subagent transcripts carry
+`usage.cache_creation`, whose only subfields are `ephemeral_5m_input_tokens` and
+`ephemeral_1h_input_tokens`; some requests are 100% 1-hour (`cache_creation_input_tokens: 52237`
+against `ephemeral_1h_input_tokens: 52237`). Published pricing is **1.25× for a 5-minute write and
+2× for a 1-hour one**; reads are 0.1× with no TTL split, so the read half of the code's assumption
+is right as written. `transcript.mjs` reads only `cache_creation_input_tokens` and bills the
+undifferentiated total at 1.25×, so 1-hour writes are **under**-billed — the one direction §K6 says a
+cost figure must never fail in. The string `ephemeral` occurs nowhere in `scripts/` or `tests/`.
+
+Size of the error, recomputed with the repository's own grouping: run 9 $91.4410 → **$91.5975**
+(+0.171%), run 8 $51.3520 → **$51.5351** (+0.357%). 1-hour writes are 1.38% and 2.84% of cache-write
+tokens and belonged entirely to Sonnet, the cheapest tier in play, in both runs. Nothing gates on the
+figure; the only consumer is the $75 notice, whose crossing point moves by ~0.3%. Two things the
+correction must not do: implement it as `5m × 1.25 + 1h × 2.0` — 30 rows in run 9 carry a
+`cache_creation_input_tokens` **larger** than the sum of its two subfields, so that form silently
+loses tokens, and a premium added to the existing base is the safe shape — and leave the memo key at
+`v2:`, which would keep serving the pre-correction figure for exactly the two finished runs this
+project quotes its economics from.
+
+**The labelling matters more than the arithmetic.** These are subscription-billed sessions: **token
+counts are measured; dollars are derived** at API list price. §A4 validated the per-token tiers from
+the binary and says nothing about cache multipliers — those were asserted, in a document that called
+them "the real multipliers".
+
+Sonnet 5 carries an introductory price of **$2/$10 through 2026-08-31** against the $3/$15 list the
+table uses. It is **deliberately not applied**, and the reason is worth recording so nobody
+"corrects" it later: applying it moves run 9 to $85.99 and run 8 to $48.54, ~5.5% *down*, which is
+the direction §K6 forbids and 15–30× the size of the tier error it would sit beside; and an
+archived, digest-bound figure that reprices itself on 2026-09-01 is not a record.
+
+### V11. Outstanding retractions — closed
+
+This table listed the falsified claims the documentation pass could not itself edit. The
+remediation that followed closed every row, and per this section's own rule — delete a row when
+its claim is gone — the rows are gone: the director and all three ruleless coordinators now carry
+the corrected backgrounding rule (with a count test over every dispatch-capable agent); the
+`stop-controller.mjs` comment now reasons from `yielded`, not from a synchronous premise; every
+unconditional-model-pin site (agents, skills, preflight, the state.mjs refusal string, config,
+transcript, the regression docstring) states the §V2 precedence; and the `§P8` docstring carries
+the per-request figures from §V4. The fail-open-on-unknown row (`directorTier()` returning
+`ok: null` passing the PREFLIGHT guard while `unverifiable` never fails the completion gate) was
+acted on rather than retracted: condition 13.12b now registers an unobserved tier in
+`mustBeStated`, so silence owes a written residual-risk statement instead of passing for free.
+What remains authoritative about each claim is its correction row: §V1, §V2, §V4.
+
+### V12. The second adversarial pass — five of its findings reproduced, and what each fix became
+
+A second external review of the first remediation round was itself verified the same way, and it
+was substantially accurate: of its two criticals and four highs, all six reproduced (three by
+direct reading of code the first round had written, three in sandboxes). Recorded because two of
+them were defects *in the first round's own fixes* — the class CLAUDE.md warns about, introduced
+while fixing the class CLAUDE.md warns about.
+
+- **The eternal waiver.** The first round anchored the implementation-drift discharge to the
+  review's timestamp, so one risk statement made after the review stayed valid through every
+  later rewrite — reproduced end-to-end with the implementation replaced by broken code. Risks
+  now carry the implementation digest they were stated about (`risk --add` stamps it), and the
+  `review-implementation-N-current` discharge requires a statement about the *current* tree. A
+  waiver is a claim about one state; the timestamp form let it be a claim about all future ones.
+- **First-run phase pinning.** The first round rejected `state.phase === spec.phase` because run
+  9's legitimate re-review ran from `DESIGN_LOCK` — and over-generalised the rejection to no
+  phase rule at all, leaving a mandatory round runnable from `PREFLIGHT` whose file later
+  satisfies a gate it never ran in (reproduced). The rule now: a round's **first** execution must
+  happen in its declared phase; a replay or `*-extra` may run anywhere in the artefact's segment
+  (round-1 phase through its lock), which is where a gate can legitimately order one. Derived
+  from the phase tables, not declared.
+- **`core.quotePath`.** Every consumer that newline-split git path output received C-quoted
+  names for non-ASCII paths — `café.mjs` — so the review pack shipped a "could not be read"
+  placeholder instead of the feature's bytes with nothing failing, and the workspace baseline
+  stored the quoted name with fingerprint `absent`, which the scope check later matched and used
+  to classify a changed file as pre-existing. All path-identity sites now use `-z`
+  (NUL-delimited, never quoted): the pack's untracked list, the baseline, `changedFiles`, and
+  `gitSnapshot`'s `hash-object --stdin-paths`.
+- **Failed replays reset the cap.** Replay detection read only the canonical review file; the
+  archive-on-rerun fix moved the completed attempt aside, so a failed replay left a `failed`
+  record canonical and the next success counted as a free first run — failure→success cycles
+  walked around the §18 allowance. Replay is now "a completed attempt ever existed", archives
+  included; failed attempts also count into `codexInvocations` (they spent real quota).
+- **Non-string ids.** The first round's `requireSafeId` returned every non-string unchecked, and
+  the parser represents a valueless `--session` as boolean `true` — so `--session` with no value
+  minted a run owned by session `true`, and a valueless `--run` fell through to the
+  bound-or-newest fallback and mutated a *different* run while exiting 0. Non-strings are now
+  refused (undefined/null pass through to the callers' own missing-flag handling), and an
+  explicit-but-unusable flag is never reinterpreted as "not given".
+- **Acceptance evidence.** "Latest report must be success" skipped itself when every listed
+  report file was unreadable; `--override-reason ""` satisfied the string check; and the error
+  message promised the override reached telemetry while the event carried only `note`. All three
+  closed: unreadable evidence refuses, the reason needs ten characters, the event carries it.
+
+Two of the second pass's findings were policy, not defects, and stay open as owner decisions,
+recorded here so nobody mistakes silence for closure: whether spend/duration should gain a
+resumable pause (the ledger's own data says the shipped $75 notice would have fired at transition
+18 of 19 on the only run that crossed it — any pause needs a threshold calibrated to be useful),
+and whether a post-BRAINSTORMING `ask` should be refused rather than warned-and-recorded. One
+residual mechanical window is accepted and documented, and its shape was revised by a further
+audit: consuming `replaceable` at PreToolUse — tried first — spent the one authorisation on
+dispatches that never started, since PreToolUse precedes permission handling and execution; a
+refused or failed dispatch then left a wedge with no recovery instruction (the Stop hook's
+`yielded !== true` branch allows silently). Reverted: the reservation is committed only by the
+director `SubagentStart`/`SubagentStop` id write, i.e. when the replacement demonstrably exists,
+so failed dispatches retry freely. The accepted residue: between a `SendMessage` revival (which
+no hook can see) and that director's next stop, duplicate director dispatches are not denied;
+bounded by the double-disobedience required, the depth guard, and the id-flip detection. Closing
+it fully needs a measured `SendMessage` PreToolUse payload, which no ledger row yet provides.
+
+The §V5/§V7 dollar figures above were computed with the pre-§V10 cache arithmetic (uniform 1.25×
+writes); the corrected basis moves each by well under half a percent (§V10) and changes no
+conclusion drawn from them.
+
+### V13. The third adversarial pass — four more findings survived verification, one revert among the fixes
+
+A third external audit of the staged tree. Its two H-findings against this section's own previous
+fixes both held; two more were environmental facts nobody had validated. What shipped:
+
+- **The `replaceable` consumption reverted** — recorded in §V12's revised text. PreToolUse
+  precedes permission handling and execution, so consuming there spent the one replacement
+  authorisation on dispatches that never started, and the Stop hook's `yielded !== true` branch
+  then allowed silently: a wedge with no recovery instruction. Commitment moved to the event that
+  proves a replacement exists (the director SubagentStart/Stop id write); failed dispatches retry
+  freely; the SendMessage-revival residue stands as §V12 records it.
+- **The newest referenced report is authoritative.** Acceptance sorted the *readable* reports, so
+  a missing or corrupt attempt 2 quietly reinstated attempt 1's old success — acceptance got
+  easier the more evidence had been lost. Resolved from the id list now, and refused when that
+  file cannot be read. Completion also re-verifies each accepted package's newest report at the
+  gate and binds every stored report file into the completion digest — deleting a report after
+  acceptance invalidated nothing before this, reproduced.
+- **Compatibility floor and delegation depth.** `MIN_CLAUDE_CODE` was 2.1.0, a range nobody had
+  validated: every ledger measurement is from the 2.1.219/2.1.220 generation, and older versions
+  in the advertised range could not run the three-level delegation tree at all. Floor raised to
+  2.1.220. Preflight also fails on an inherited `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` below 3 —
+  the exact value (=2) older Hyperpowers setup wrote into projects, at which §S3 T25 measured the
+  Agent tool removed from the coordinator level, so preflight had said "ready" about an
+  environment the first EXECUTION dispatch would die in.
+- **`codexInvocations` counts invocations again.** A declined retry (half-pack lost mandatory
+  context) pushed a synthetic attempt that the counter then billed as a launch; synthetic entries
+  are marked `skipped` and excluded, on both the success and failure accounting paths.
+- **Self-location survives a spaced path.** `new URL(...).pathname` percent-encodes, so an
+  install under a directory with a space resolved to `%20` and the manifest check failed —
+  defeating self-location exactly where it was needed. `fileURLToPath` everywhere; verified
+  against a copied tree under a spaced directory.
+- **Documentation reconciled**: cost-model no longer describes the pre-§V10 accounting as
+  current; the director prompt no longer claims a waiting stop spends no continuation (it spends
+  one — that is the whole argument for one long bounded wait); README claims one director
+  *authority* rather than one uninterrupted dispatch. One validation nuance recorded for release
+  reports: marketplace strict validation passes; explicit `plugin.json` strict validation carries
+  the one documented warning about the root `CLAUDE.md` (contributor doc, intentionally not
+  shipped as plugin context — its own header says so).

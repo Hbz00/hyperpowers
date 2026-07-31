@@ -1,0 +1,6 @@
+{
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "node -e \"const fs=require('fs'),p=require('path'),os=require('os');const d=p.join(os.homedir(),'.claude','plugins','data');let best=null;try{for(const e of fs.readdirSync(d)){if(!e.startsWith('hyperpowers-'))continue;try{const m=JSON.parse(fs.readFileSync(p.join(d,e,'.data-root.json'),'utf8'));const s=p.join(m.pluginRoot,'scripts','statusline.mjs');if(fs.existsSync(s)&&(!best||m.stampedAt>best.at))best={s,at:m.stampedAt};}catch{}}}catch{}if(best)import(best.s);\""
+  }
+}

@@ -137,21 +137,28 @@ describe('state machine', () => {
   });
 });
 
-describe('stop controller', () => {
+describe('subagent controller — the autonomy loop', () => {
+  // The phase machine lives on `SubagentStop` now: blocking `Stop` re-drives the main thread,
+  // which directs nothing, while a `SubagentStop` block re-drives the director (§R6). The payload
+  // carries `agent_type` and `agent_id`, and the counter is keyed on the latter because
+  // `prompt_id` is shared with the main thread (§R5).
   const stopPayload = (overrides = {}) => JSON.stringify({
     session_id: 'sess-1',
+    agent_type: 'hyperpowers:hyperpowers-director',
+    agent_id: 'agent-1',
     transcript_path: '/nonexistent/transcript.jsonl',
+    agent_transcript_path: '/nonexistent/agent.jsonl',
     cwd: PROJECT,
     prompt_id: 'prompt-1',
     permission_mode: 'default',
-    hook_event_name: 'Stop',
+    hook_event_name: 'SubagentStop',
     stop_hook_active: false,
     last_assistant_message: 'working',
     ...overrides,
   });
 
   test('blocks and injects the next action while the run is active', () => {
-    const out = JSON.parse(run('stop-controller.mjs', [], { input: stopPayload() }).stdout);
+    const out = JSON.parse(run('subagent-controller.mjs', [], { input: stopPayload() }).stdout);
     assert.equal(out.decision, 'block');
     assert.match(out.reason, /HYPERPOWERS/);
     assert.match(out.reason, /Phase: DESIGN_DRAFT/);
@@ -161,7 +168,7 @@ describe('stop controller', () => {
 
   test('surfaces unmet exit requirements in the injected reason', () => {
     fs.rmSync(path.join(findRunDir(), 'design.md'), { force: true });
-    const out = JSON.parse(run('stop-controller.mjs', [], { input: stopPayload({ prompt_id: 'p2' }) }).stdout);
+    const out = JSON.parse(run('subagent-controller.mjs', [], { input: stopPayload({ agent_id: 'agent-2' }) }).stdout);
     assert.match(out.reason, /cannot be exited yet/);
     assert.match(out.reason, /design/);
   });
@@ -170,25 +177,42 @@ describe('stop controller', () => {
     let reason = '';
     // Same payload, unchanged state: each call must register another stall.
     for (let i = 0; i < 3; i += 1) {
-      reason = JSON.parse(run('stop-controller.mjs', [], { input: stopPayload({ prompt_id: 'p3', stop_hook_active: true }) }).stdout).reason;
+      reason = JSON.parse(run('subagent-controller.mjs', [], { input: stopPayload({ agent_id: 'agent-3', stop_hook_active: true }) }).stdout).reason;
     }
     assert.match(reason, /No progress detected/);
-    assert.match(reason, /Escalate to (Opus|Fable)/);
+    // The ladder's top rung used to read 'Escalate to Fable'. The director is Fable, so it now
+    // escalates to its own judgement instead of handing off to itself — the rung is still
+    // named, which is what this asserts.
+    assert.match(reason, /Escalate to (Opus|your own judgement)/);
   });
 
   test('blocks the run after persistent stalling and allows the stop', () => {
     for (let i = 0; i < 6; i += 1) {
-      run('stop-controller.mjs', [], { input: stopPayload({ prompt_id: 'p3', stop_hook_active: true }) });
+      run('subagent-controller.mjs', [], { input: stopPayload({ agent_id: 'agent-3', stop_hook_active: true }) });
     }
     const state = JSON.parse(fs.readFileSync(path.join(findRunDir(), 'state.json'), 'utf8'));
     assert.equal(state.phase, 'BLOCKED');
-    const out = JSON.parse(run('stop-controller.mjs', [], { input: stopPayload({ prompt_id: 'p4' }) }).stdout);
+    const out = JSON.parse(run('subagent-controller.mjs', [], { input: stopPayload({ agent_id: 'agent-4' }) }).stdout);
     assert.equal(out.decision, undefined, 'a terminal run must not block the stop');
     assert.match(out.systemMessage, /BLOCKED/);
   });
 
+  test('a returning worker is not a director checkpoint', () => {
+    // The whole reason the loop can live here. An implementer's process ends *before* its report
+    // lands on disk, so sampling progress on every SubagentStop would read a healthy wave of ten
+    // as ten "no progress" cycles and block a run that is working — §L3 with the sign inverted.
+    const before = JSON.parse(fs.readFileSync(path.join(findRunDir(), 'state.json'), 'utf8'));
+    const out = JSON.parse(run('subagent-controller.mjs', [], {
+      input: stopPayload({ agent_type: 'hyperpowers:sonnet-implementer', agent_id: 'w-1' }),
+    }).stdout);
+    assert.equal(out.decision, undefined, 'a worker finishing must never be blocked by this hook');
+    const after = JSON.parse(fs.readFileSync(path.join(findRunDir(), 'state.json'), 'utf8'));
+    assert.equal(after.stall.count, before.stall.count, 'and must not move the stall counter');
+    assert.deepEqual(after.directorTurn, before.directorTurn, 'nor the director block counter');
+  });
+
   test('stays out of the way when no run is bound to the session', () => {
-    const out = run('stop-controller.mjs', [], { input: stopPayload({ session_id: 'unknown-session' }) });
+    const out = run('subagent-controller.mjs', [], { input: stopPayload({ session_id: 'unknown-session' }) });
     assert.deepEqual(JSON.parse(out.stdout), {});
   });
 
@@ -200,11 +224,21 @@ describe('stop controller', () => {
     });
     // blockCap 6 → soft cap 2 (margin 4), so the third continuation must yield.
     fs.writeFileSync(path.join(PROJECT, '.hyperpowers.json'), JSON.stringify({ stop: { blockCap: 6, softCapMargin: 4 } }));
+    const hookEnv = { ...env(), CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '6' };
+    const fire = (script, input) => JSON.parse(execFileSync('node', [path.join(ROOT, 'scripts', script)],
+      { encoding: 'utf8', env: hookEnv, input }));
+    // The main thread's counter advances once per *hand-back* from the director (§S12), so each
+    // cycle has to produce one. Driving `Stop` alone would now be allowed every time, which is the
+    // whole point of that fix — and a test that skipped the yield would be asserting against a
+    // sequence no run can produce.
+    const directorStop = JSON.stringify({
+      session_id: 'sess-cap', cwd: PROJECT, prompt_id: 'p', hook_event_name: 'SubagentStop',
+      agent_type: 'hyperpowers:hyperpowers-director', agent_id: 'dir-cap', stop_hook_active: true,
+    });
     let out;
     for (let i = 0; i < 4; i += 1) {
-      out = JSON.parse(execFileSync('node', [path.join(ROOT, 'scripts', 'stop-controller.mjs')], {
-        encoding: 'utf8', env: { ...env(), CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: '6' }, input: payload,
-      }));
+      while (fire('subagent-controller.mjs', directorStop).decision === 'block') { /* to the yield */ }
+      out = fire('stop-controller.mjs', payload);
     }
     fs.rmSync(path.join(PROJECT, '.hyperpowers.json'), { force: true });
     assert.match(out.systemMessage ?? '', /suspended/i);
@@ -297,10 +331,15 @@ describe('git-policy hook', () => {
 });
 
 describe('agent report validation', () => {
+  // Its own run, because `submit` writes and a write into a finished run is refused (§S14) — and
+  // the shared run above is deliberately driven into BLOCKED by the stall tests.
+  let OWN;
+  before(() => { OWN = json(sm(['init', '--session', 'sess-reports', '--description', 'report tests'])).runId; });
+
   const submit = (report, expectFail = false) => {
     const file = path.join(TMP, 'report.json');
     fs.writeFileSync(file, JSON.stringify(report));
-    return run('validate-agent-report.mjs', ['submit', '--project', PROJECT, '--run', RUN, '--file', file], { expectFail });
+    return run('validate-agent-report.mjs', ['submit', '--project', PROJECT, '--run', OWN, '--file', file], { expectFail });
   };
 
   const valid = {

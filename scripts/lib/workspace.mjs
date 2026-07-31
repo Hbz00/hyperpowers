@@ -20,10 +20,14 @@ import { execFileSync } from 'node:child_process';
 import { sha256, nowIso } from './io.mjs';
 
 /**
- * Above this, hash the metadata instead of the bytes. An enormous dirty file is rare, and
- * reporting drift slightly too eagerly is the safe direction for a scope check.
+ * There is no size cap any more — every regular file is hashed by content.
+ *
+ * The cap (`size:mtime` above 8 MiB) was justified as "reporting drift slightly too eagerly is
+ * the safe direction", and the code did the opposite of the comment: a same-size content swap
+ * with the mtime restored compared *equal*, so a large already-dirty file could be rewritten and
+ * classified `preExisting` — exempted from §13.10 — reproduced. Hashing a 100 MB file costs
+ * ~40 ms, once per run at baseline capture; correctness is affordable here.
  */
-const HASH_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Files Hyperpowers itself writes into the working tree.
@@ -33,7 +37,7 @@ const HASH_MAX_BYTES = 8 * 1024 * 1024;
  * which produced exactly what it should have: a live run's round-5 reviewer raised a **blocking**
  * finding against `.claude/settings.json`, correctly observing an unowned file in the change and
  * that it "disables workflows and related safeguards". It was right about what it saw; what it
- * saw was `/hyperpowers:setup`'s own output, and a mandatory review round plus an adjudication
+ * saw was the plugin's own setup output, and a mandatory review round plus an adjudication
  * cycle were spent on it.
  *
  * One list, used by both, or the two halves disagree about what the change even is.
@@ -62,8 +66,32 @@ export function excludeOwnFiles() {
  * fallback, sit under the project: what matters is that it is not part of the change being
  * reviewed.
  */
+/**
+ * Canonical form of a path: symlinks resolved, aliases collapsed. The leaf may not exist yet
+ * (`publish-request` checks existence afterwards), so the nearest existing ancestor is
+ * canonicalised and the missing tail re-joined. One implementation for both containment checks —
+ * it was written twice, in adjacent functions, which is how the two would eventually disagree.
+ */
+function canonicalPath(p) {
+  let head = path.resolve(p);
+  const tail = [];
+  for (let i = 0; i < 100 && head !== path.dirname(head); i += 1) {
+    try {
+      return path.join(fs.realpathSync(head), ...tail.reverse());
+    } catch {
+      tail.push(path.basename(head));
+      head = path.dirname(head);
+    }
+  }
+  return path.resolve(p);
+}
+
 export function misplacedOrchestrationFile(filePath, projectRoot, runBase) {
-  const inside = (parent) => !path.relative(path.resolve(parent), path.resolve(filePath)).startsWith('..');
+  // Canonical paths on both sides, not lexical ones. `path.resolve` alone let the same file be
+  // refused or accepted depending on which alias addressed it — on macOS `/tmp` vs `/private/tmp`
+  // makes that disagreement routine, no adversary required.
+  const file = canonicalPath(filePath);
+  const inside = (parent) => !path.relative(canonicalPath(parent), file).startsWith('..');
   if (!inside(projectRoot) || inside(runBase)) return null;
   return (
     `${filePath} is inside the project working tree.\n\n` +
@@ -74,11 +102,25 @@ export function misplacedOrchestrationFile(filePath, projectRoot, runBase) {
   );
 }
 
-function gitLines(root, args) {
+/**
+ * Is this path — canonically, symlinks resolved — inside the run directory?
+ *
+ * `publish-request` hands its file to the main thread, which publishes it to a claude.ai page.
+ * The director's contract says the page is written into the run directory (spec §20 keeps it out
+ * of the reviewed diff), and the check is canonical rather than lexical so a symlink planted
+ * inside the run directory cannot smuggle outside content into the publication.
+ */
+export function insideRunDir(filePath, runBase) {
+  return !path.relative(canonicalPath(runBase), canonicalPath(filePath)).startsWith('..');
+}
+
+/** NUL-delimited path list; the caller passes `-z`. Local rather than imported from review-pack,
+ * which imports this module — see `gitPathsZ` there for why newline-splitting paths is unsafe. */
+function gitPathsZ(root, args) {
   try {
     return execFileSync('git', ['-c', 'core.pager=cat', ...args], {
       cwd: root, encoding: 'utf8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).split('\n').map((s) => s.trim()).filter(Boolean);
+    }).split('\0').filter(Boolean);
   } catch {
     return null;
   }
@@ -90,14 +132,32 @@ function gitLines(root, args) {
  * `absent` is a real value, not an error: a file that did not exist at run start and does now is
  * a change, and conflating "missing" with "unreadable" would exempt it.
  */
+/** Above this, hash through git instead of a Buffer — same exactness, streamed in C, no
+ * multi-gigabyte allocation inside a Node process that also runs inside hook budgets. */
+const HASH_EXEC_BYTES = 64 * 1024 * 1024;
+
 function fingerprintFile(abs) {
   try {
     const stat = fs.statSync(abs);
     if (!stat.isFile()) return `special:${stat.mode}`;
-    if (stat.size > HASH_MAX_BYTES) return `size:${stat.size}:mtime:${Math.floor(stat.mtimeMs)}`;
+    if (stat.size > HASH_EXEC_BYTES) {
+      // `git hash-object` works on any file, repository or not, and changes exactly when the
+      // bytes do. The metadata shortcut this replaces compared equal across a same-size content
+      // swap; a whole-file Buffer read fixed that and traded it for unbounded memory.
+      const blob = execFileSync('git', ['hash-object', '--', abs], {
+        encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (blob) return `gitblob:${blob}`;
+      throw Object.assign(new Error('empty hash-object output'), { code: 'EEMPTYHASH' });
+    }
     return `sha256:${sha256(fs.readFileSync(abs))}`;
-  } catch {
-    return 'absent';
+  } catch (err) {
+    // "Missing" and "unreadable" must not share a value: `'absent' === 'absent'` is itself an
+    // exemption, so a file too large for a Buffer or unreadable for any other reason would
+    // compare equal to its own baseline and be excused. A value that can never compare equal
+    // keeps the stated safe direction — an unreadable file is attributed to the run.
+    if (err?.code === 'ENOENT') return 'absent';
+    return `unreadable:${err?.code ?? 'unknown'}:${Math.random().toString(36).slice(2)}`;
   }
 }
 
@@ -110,8 +170,11 @@ function fingerprintFile(abs) {
  * passes.
  */
 export function captureWorkspaceBaseline(root) {
-  const tracked = gitLines(root, ['diff', '--name-only', 'HEAD']);
-  const untracked = gitLines(root, ['ls-files', '--others', '--exclude-standard']);
+  // `-z`: under default `core.quotePath` a non-ASCII path arrives C-quoted, and the baseline then
+  // stored the quoted name with fingerprint `absent` — which the scope check later "matched" and
+  // used to classify a changed file as pre-existing. Reproduced with `café.mjs`.
+  const tracked = gitPathsZ(root, ['diff', '--name-only', '-z', 'HEAD']);
+  const untracked = gitPathsZ(root, ['ls-files', '--others', '--exclude-standard', '-z']);
   if (tracked === null && untracked === null) return { at: nowIso(), available: false, files: {} };
 
   const files = {};

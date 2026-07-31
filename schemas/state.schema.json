@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Hyperpowers run state",
-  "description": "Persisted at ${CLAUDE_PLUGIN_DATA}/projects/<project>/runs/<run-id>/state.json. This file is the run: it survives compaction, session loss and restarts, and is the only thing /hyperpowers:resume needs (spec \u00a723 Risk 7).",
+  "description": "Persisted at ${CLAUDE_PLUGIN_DATA}/projects/<project>/runs/<run-id>/state.json. This file is the run: it survives compaction, session loss and restarts, and is the only thing /hyperpowers:resume needs (spec §23 Risk 7).",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -63,7 +63,7 @@
     },
     "history": {
       "type": "array",
-      "description": "Spec \u00a711: every transition records who, when, what artefact, what proof, what cost, which fallbacks and what remains open.",
+      "description": "Spec §11: every transition records who, when, what artefact, what proof, what cost, which fallbacks and what remains open.",
       "items": {
         "type": "object",
         "required": [
@@ -144,7 +144,7 @@
         },
         "extraReviews": {
           "type": "object",
-          "description": "Extra \u00a718 review rounds used, keyed by artefact. Bounded by maxExtraReviewsPerArtifact and enforced by the Codex adapter."
+          "description": "Extra §18 review rounds used, keyed by artefact. Bounded by maxExtraReviewsPerArtifact and enforced by the Codex adapter."
         },
         "subagentsCompleted": {
           "type": "integer",
@@ -224,6 +224,46 @@
         }
       }
     },
+    "directorTurn": {
+      "type": "object",
+      "description": "The director's own block counter, keyed on agent_id because prompt_id is shared with the main thread (R5). `yielded` is written only by subagent-controller.mjs and says whether the director handed control back — the main thread's Stop hook reads it and nothing else (S12).",
+      "properties": {
+        "agentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blocks": {
+          "type": "integer"
+        },
+        "yielded": {
+          "type": "boolean"
+        },
+        "replaceable": {
+          "type": "boolean",
+          "description": "Set by stop-controller.mjs when it instructs the main thread to resume-or-replace the director; read by directorIsDriving so the one-director rule does not deny the dispatch that instruction asks for. Cleared by subagent-controller.mjs on the next director event."
+        }
+      }
+    },
+    "children": {
+      "type": "object",
+      "description": "Subagents started and not yet stopped, agent_id -> {at, type}. Written for every agent on SubagentStart/SubagentStop (T1). Membership only: parentage is read from the harness meta files, which is what tells a waiting director from a stalled one (S15).",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    },
     "blocked": {
       "type": [
         "string",
@@ -232,7 +272,7 @@
     },
     "artifacts": {
       "type": "object",
-      "description": "External artefacts produced by the run, written by `state-machine.mjs artifact`. `diagramUrl` satisfies spec \u00a713 condition 14.",
+      "description": "External artefacts produced by the run. `diagramUrl` is written by `state-machine.mjs published`, which the main thread runs after publishing the page the director parked (S21), and satisfies spec §13 condition 14.",
       "properties": {
         "diagramUrl": {
           "type": "string"
@@ -241,7 +281,7 @@
     },
     "reportRejections": {
       "type": "object",
-      "description": "Rejected-report count per work package. Spec \u00a716.4 grants one correction per package, shared between the SubagentStop reminder and the submit validator."
+      "description": "Rejected-report count per work package. Spec §16.4 grants one correction per package, shared between the SubagentStop reminder and the submit validator."
     },
     "observedDirectorModel": {
       "type": [
@@ -264,7 +304,7 @@
     },
     "gitDrift": {
       "type": "array",
-      "description": "Repository drift detected by the PostToolUse guard (spec \u00a713 condition 11)."
+      "description": "Repository drift detected by the PostToolUse guard (spec §13 condition 11)."
     }
   }
 }

@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { artifacts, PLUGIN_ROOT, activeRunId } from './lib/paths.mjs';
 import { readJson, writeJson, nowIso } from './lib/io.mjs';
-import { loadState, tryLoadState, mutateState } from './lib/state.mjs';
+import { tryLoadState, mutateState, refuseIfEnded } from './lib/state.mjs';
 import { validate } from './lib/validate.mjs';
 import { misplacedOrchestrationFile } from './lib/workspace.mjs';
 import { logEvent } from './lib/telemetry.mjs';
@@ -45,6 +45,12 @@ function runCli(mode) {
   const projectRoot = resolveProjectRoot(flags);
   const runId = resolveRunId(projectRoot, flags);
   if (!runId) fail(`No Hyperpowers run found for ${projectRoot}.`);
+  // §S14: `submit` stores the report and moves the package's status. `check` only validates, and
+  // validating a report against a finished run is legitimate auditing.
+  if (mode === 'submit') {
+    const ended = refuseIfEnded(projectRoot, runId);
+    if (ended) fail(ended, 2);
+  }
   if (typeof flags.file !== 'string') fail(`${mode} requires --file <report.json>.`);
 
   const reportPath = path.resolve(projectRoot, flags.file);
@@ -179,10 +185,6 @@ function runCli(mode) {
 }
 
 /**
- * Checks the schema cannot express, each aimed at a specific way a report can be technically
- * valid and substantively empty.
- */
-/**
  * A list, whatever the agent actually sent.
  *
  * `x ?? []` only defends against null and undefined. A report whose `evidence` is an *object* —
@@ -210,6 +212,10 @@ function confined(dir, name) {
   return target === base || target.startsWith(base + path.sep) ? target : null;
 }
 
+/**
+ * Checks the schema cannot express, each aimed at a specific way a report can be technically
+ * valid and substantively empty.
+ */
 function semanticChecks(report) {
   const problems = [];
   // Every field is read defensively: this function runs on reports that have already failed
@@ -291,6 +297,11 @@ async function runAsHook() {
 
       const state = tryLoadState(projectRoot, runId);
       if (!state) return emitAllowStop();
+
+      // Nothing is counted into a finished run (§S14). Subagents outlive the run's state — the harness
+      // keeps them going and no hook can stop them — so without this the closed record kept growing a
+      // `subagentsCompleted` for work that had nowhere to go.
+      if (refuseIfEnded(projectRoot, runId)) return emitAllowStop();
 
       // Every finished subagent is counted here. This is the only place the harness tells us a
       // delegation completed, so it is what makes the `maxSubagents` bound real — the counter it

@@ -58,6 +58,24 @@ export function gitLines(projectRoot, args, options) {
 }
 
 /**
+ * Path list from a git command run with `-z` — the caller must pass the flag.
+ *
+ * Newline-splitting git output is only safe for display. Under default `core.quotePath`, a path
+ * with any non-ASCII byte comes back C-quoted (`"caf\303\251.mjs"`), and every consumer that fed
+ * such a "path" back to git or the filesystem read a file that does not exist: the review pack
+ * shipped a placeholder instead of the feature's bytes, and the workspace baseline stored the
+ * quoted name with fingerprint `absent` — which a later scope check matched against the same
+ * wrong answer and classified the changed file as pre-existing. Not a pathological filename; any
+ * accented character in a normal international codebase does it. `-z` output is NUL-delimited and
+ * never quoted, so the identity survives.
+ */
+export function gitPathsZ(projectRoot, args, options) {
+  const out = gitTry(projectRoot, args, options);
+  if (out === null) return null;
+  return out.split('\0').filter(Boolean);
+}
+
+/**
  * Ceiling for collecting the working-tree diff, deliberately far above `reviewPackMaxBytes`.
  *
  * The pack's own cap is what decides how much of a diff a reviewer sees; this only decides
@@ -134,7 +152,7 @@ export function collectSections(projectRoot, runId, round) {
     // completion gate uses. Showing them was not a cosmetic problem: a live round-5 reviewer
     // raised a blocking finding against `.claude/settings.json`, correctly noting an unowned file
     // in the diff that disables workflows — and burned a mandatory round and an adjudication cycle
-    // on `/hyperpowers:setup`'s own output. The gate already excused them; only the reviewer was
+    // on the plugin's own setup output. The gate already excused them; only the reviewer was
     // being shown a change the run had not made.
     const own = excludeOwnFiles();
     sections.push(section('CHANGED FILES', gitRead(projectRoot, ['status', '--short', '--untracked-files=all', ...own]), 0));
@@ -147,7 +165,7 @@ export function collectSections(projectRoot, runId, round) {
     // diff dropped, `droppedMandatory` empty, nothing failed, 123 kB of a 180 kB budget used.
     // The command carries the same exclusions the section does. A bare `git diff HEAD` shows
     // Hyperpowers' own files, and a round-5 reviewer that saw them raised a blocking finding
-    // against `/hyperpowers:setup`'s output — so an incomplete recovery instruction would
+    // against the plugin's own setup output — so an incomplete recovery instruction would
     // reintroduce, through the back door, the exact false positive the exclusion exists to stop.
     // Collected with a budget far above the pack's, because the renderer is what must bound this
     // section — not `execFileSync`. At the 400 kB default a 561 kB diff (one 535 kB file) came
@@ -174,7 +192,39 @@ export function collectSections(projectRoot, runId, round) {
       recover: `the JSON reports in ${a.reportsDir}`,
       boundary: '### ',
     }));
-    sections.push(section('UNTRACKED FILE INVENTORY', gitRead(projectRoot, ['ls-files', '--others', '--exclude-standard', ...own]), 3));
+    // The bytes of the untracked files, not only their names. `git diff HEAD` structurally cannot
+    // show an untracked file, and in this workflow untracked-only delivery is the normal case,
+    // not an edge one — the user performs all Git, so a feature's new files stay untracked for the
+    // whole run. Run 8's entire deliverable was two untracked files and its 127 kB round-5 pack
+    // contained zero bytes of them; run 9's five-file deliverable reached a *clean* round the same
+    // way. Rendered as real `diff --git` hunks so the existing truncation, boundary and recovery
+    // machinery cover it unchanged. Mandatory exactly when untracked files exist: an empty section
+    // on a tracked-only change is not a gap, and marking it mandatory anyway would have it
+    // filtered before the guard ever saw it.
+    const untrackedList = gitPathsZ(projectRoot, ['ls-files', '--others', '--exclude-standard', '-z', ...own]);
+    if (untrackedList === null || untrackedList.length) {
+      const contents = untrackedList === null ? null : untrackedContents(projectRoot, untrackedList);
+      sections.push(section(
+        'UNTRACKED FILE CONTENTS',
+        untrackedList === null ? '(git ls-files unavailable)' : contents.text,
+        0,
+        true,
+        {
+          // Unavailable when the inventory could not be read at all, and also when *no* listed
+          // file could be — a section made entirely of "could not be read" placeholders satisfied
+          // section presence while carrying none of the artefact under review. A partial failure
+          // stays in the pack: the readable files are shown, the placeholders disclose the rest.
+          unavailable: untrackedList === null || (untrackedList.length > 0 && contents.readable === 0),
+          recover: `run \`git diff --no-index -- /dev/null <path>\` in ${projectRoot} for each path in the untracked inventory`,
+          boundary: 'diff --git ',
+          maxShare: 0.5,
+        },
+      ));
+    }
+    // Rendered from the same `-z` list as the contents section, so the inventory shows real
+    // names rather than C-quoted ones a reader cannot paste into a command.
+    sections.push(section('UNTRACKED FILE INVENTORY',
+      untrackedList === null ? '(git ls-files unavailable)' : untrackedList.join('\n'), 3));
     // The plan is what "fidelity" is measured against, and the prompt puts two of its nine attack
     // surfaces on it — *"where does the implementation diverge from the design or the plan"* and
     // *"behaviour in the design with no corresponding test"*. In the first production run both
@@ -194,6 +244,16 @@ export function collectSections(projectRoot, runId, round) {
     const previous = readJson(a.review(previousRound), null);
     const state = readJson(a.state, {});
     const adjudication = state.adjudications?.[previousRound] ?? null;
+    // An absent predecessor must surface as a gap, not vanish. `formatFindings(null)` returned an
+    // empty body, the empty-body filter below removed the section, and a targeted round ran with
+    // no findings to target and nothing failing — reproduced (`design-2` with no `design-1.json`
+    // emitted a pack with zero occurrences of "PREVIOUS ROUND FINDINGS"). "Absent entirely" is
+    // neither dropped nor truncated, so only the `unavailable` flag reaches `mandatoryGaps`.
+    const previousMissing = !previous || previous.status !== 'completed';
+    // No decisions over no findings is the legitimate clean case; no decisions over real findings
+    // means the mandated adjudication has not happened, and the round must not run without it.
+    const adjudicationMissing = !previousMissing && (previous.findings?.length ?? 0) > 0
+      && (adjudication?.decisions?.length ?? 0) === 0;
     // Priority -1, not 0: for a targeted round these two *are* the review. Round two verifies
     // corrections rather than repeating round one (spec §8.7), which is impossible without the
     // findings being verified and the decisions taken on them. At priority 0 they sorted last
@@ -206,28 +266,141 @@ export function collectSections(projectRoot, runId, round) {
     // not fit means something is badly wrong rather than merely large. Truncation here still
     // fails the round, which is the §8.7 guarantee — a targeted round with a partial view of what
     // it must verify is not a targeted round.
-    sections.push(section(`PREVIOUS ROUND FINDINGS (${previousRound})`, formatFindings(previous), -1, true));
-    sections.push(section('ADJUDICATION RECORD', formatAdjudications(adjudication, previous), -1, true));
+    sections.push(section(`PREVIOUS ROUND FINDINGS (${previousRound})`,
+      previousMissing ? `(no completed review exists for ${previousRound})` : formatFindings(previous),
+      -1, true, { unavailable: previousMissing }));
+    sections.push(section('ADJUDICATION RECORD',
+      previousMissing
+        ? `(no completed review exists for ${previousRound}, so there is nothing adjudicated)`
+        : adjudicationMissing
+          ? `(${previousRound} reported ${previous.findings.length} finding(s) and none has a recorded decision)`
+          : (previous.findings?.length ?? 0) === 0
+            ? '(the previous round reported no findings, so there was nothing to adjudicate)'
+            : formatAdjudications(adjudication, previous),
+      -1, true, { unavailable: previousMissing || adjudicationMissing }));
   }
 
-  return sections.filter((s) => s.body.length > 0);
+  // Empty-bodied sections are dropped for readability — except an unavailable mandatory one,
+  // which must survive to `renderPack` or the gap it announces is invisible to `mandatoryGaps`.
+  return sections.filter((s) => s.body.length > 0 || (s.mandatory && s.unavailable));
 }
 
-function summariseTasks(tasks) {
+/**
+ * Each untracked file as a real diff against nothing.
+ *
+ * `git diff --no-index` exits 1 when the files differ — which is the success case here — so this
+ * cannot go through `gitTry`, whose contract is "throw means null". Binary files render as
+ * "Binary files differ", which is the right behaviour: names and sizes reach the reviewer, bytes
+ * do not.
+ */
+function untrackedContents(projectRoot, paths) {
+  const parts = [];
+  let readable = 0;
+  for (const rel of paths) {
+    try {
+      parts.push(execFileSync('git', ['-c', 'core.pager=cat', 'diff', '--no-index', '--', '/dev/null', rel], {
+        cwd: projectRoot, encoding: 'utf8', maxBuffer: DIFF_COLLECT_MAX_BYTES, timeout: 30_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }));
+      readable += 1;
+    } catch (err) {
+      if (typeof err?.stdout === 'string' && err.stdout.length) {
+        parts.push(err.stdout);
+        readable += 1;
+      } else {
+        parts.push(`diff --git a/${rel} b/${rel}\n(could not be read: ${err?.code ?? err?.status ?? 'unknown'})\n`);
+      }
+    }
+  }
+  return { text: parts.join(''), readable };
+}
+
+/**
+ * A work package as the reviewer must see it — the whole contract, not a digest of it.
+ *
+ * `interfaces` and `constraints` were missing. They are two of the eight clauses the work-package
+ * schema defines as the contract, and they are precisely where a plan goes wrong: a signature that
+ * contradicts the design, a constraint the implementer cannot meet. Codex was being asked whether a
+ * plan was sound while two of its clauses were withheld — found by run 7 itself, which recorded it
+ * as a residual risk against its own tooling.
+ *
+ * Two ways to withhold a clause were then found in the fix for the first. `may_read` named a field
+ * that exists nowhere in the schema (it is `read_only_context`), so the row rendered `(none)` for
+ * every package in every plan review — a field one half reads and nothing writes, in the commit that
+ * fixed the same defect one field over. And `commands` were joined with ` && `, which *manufactures*
+ * the property a reviewer is asked to check: run 8's longest-surviving blocking finding was a
+ * verification chained with `;`, so it passed whatever failed, and this renderer would have shown it
+ * as a fail-closed chain. Each command now stands on its own line, as written.
+ *
+ * The table is hand-written because the labels and the shaping are editorial. What makes it
+ * trustworthy is not generality but `tests/regression.test.mjs`, which fails when a schema property
+ * is neither rendered here nor named in `NOT_REVIEWED`, and when a populated field does not survive
+ * rendering.
+ */
+const PACKAGE_CONTRACT_FIELDS = Object.freeze([
+  ['Objective', (t) => t.objective],
+  ['Files in scope', (t) => (t.scope?.files ?? []).join(', ')],
+  ['Owned files', (t) => (t.scope?.owned_files ?? []).join(', ')],
+  ['May read', (t) => (t.scope?.read_only_context ?? []).join(', ')],
+  ['Interfaces', (t) => asJoined(t.interfaces)],
+  ['Constraints', (t) => asJoined(t.constraints)],
+  ['Acceptance criteria', (t) => asJoined(t.acceptance_criteria)],
+  ['Verification', (t) => asBlock([
+    t.verification?.method,
+    // Verbatim, one per line. A reviewer asked "can this verification fail?" must see the command
+    // the plan actually wrote, not a chain this renderer composed.
+    ...(t.verification?.commands ?? []).map((c) => `  $ ${c}`),
+    t.verification?.expected ? `  expected: ${t.verification.expected}` : null,
+  ])],
+  ['Depends on', (t) => (t.depends_on ?? []).join(', ')],
+  ['Out of scope', (t) => asJoined(t.out_of_scope)],
+]);
+
+/**
+ * Schema properties deliberately not shown to the reviewer, each with its reason.
+ *
+ * The reason is the point: a property is either part of the contract under review or it is named
+ * here as something else. Silence is what let two clauses go missing, so silence is what the test
+ * refuses.
+ */
+export const NOT_REVIEWED = Object.freeze({
+  id: 'rendered in the package heading',
+  status: 'rendered in the package heading',
+  report_format: 'the shape of the report, not the work being reviewed',
+  model: 'routing preference, not contract',
+  effort: 'routing preference, not contract',
+  parallel_safe: 'a claim about owned_files, which is rendered — the reviewer checks the premise',
+  attempts: 'lifecycle bookkeeping, written after the plan is locked',
+  reports: 'lifecycle bookkeeping, written after the plan is locked',
+});
+
+/**
+ * One label's worth of value on one line: arrays of strings *or* of objects both occur in the wild, and
+ * neither may render as `[object Object]`. Its sibling `asBlock` is the multi-line form — the two used to
+ * be `asLines` and `asBlock`, where the one called "lines" was the one that joined with semicolons.
+ */
+function asJoined(value) {
+  if (value == null) return '';
+  const list = Array.isArray(value) ? value : [value];
+  return list
+    .map((v) => (typeof v === 'string' ? v : Object.entries(v ?? {}).map(([k, x]) => `${k}=${x}`).join(' ')))
+    .filter(Boolean)
+    .join('; ');
+}
+
+/** Several facts under one label, each on its own line, empties dropped. */
+function asBlock(parts) {
+  return parts.filter(Boolean).join('\n');
+}
+
+export function summariseTasks(tasks) {
   const list = tasks?.tasks ?? [];
   if (list.length === 0) return '';
   return list
-    .map((t) =>
-      [
-        `## ${t.id} — ${t.status}`,
-        `Objective: ${t.objective}`,
-        `Owned files: ${(t.scope?.owned_files ?? []).join(', ') || '(none)'}`,
-        `Acceptance criteria: ${(t.acceptance_criteria ?? []).join(', ') || '(none)'}`,
-        `Verification: ${(t.verification?.commands ?? []).join(' && ') || '(none)'}`,
-        `Depends on: ${(t.depends_on ?? []).join(', ') || '(none)'}`,
-        `Out of scope: ${(t.out_of_scope ?? []).join('; ') || '(none)'}`,
-      ].join('\n'),
-    )
+    .map((t) => [
+      `## ${t.id} — ${t.status}`,
+      ...PACKAGE_CONTRACT_FIELDS.map(([label, get]) => `${label}: ${get(t) || '(none)'}`),
+    ].join('\n'))
     .join('\n\n');
 }
 
@@ -396,7 +569,10 @@ export function renderPack(sections, maxBytes) {
   // Raised from 1 kB once the notice started carrying recovery paths: it is now the instruction
   // that makes a dropped section retrievable, so clamping it away would remove the remedy along
   // with the complaint.
-  const NOTICE_ALLOWANCE = 2_048;
+  // Never larger than the budget it is carved out of. At a `maxBytes` below the allowance the
+  // section budget went to zero while the notice was still allowed its full 2 kB, so `renderPack`
+  // returned a pack bigger than the cap it reports honouring.
+  const NOTICE_ALLOWANCE = Math.min(2_048, maxBytes);
   let budget = Math.max(0, maxBytes - NOTICE_ALLOWANCE);
   const kept = [];
 

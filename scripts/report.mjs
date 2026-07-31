@@ -16,9 +16,9 @@ import { parseArgs, fail, emitJson, ok, resolveProjectRoot, resolveRunId } from 
 import { listRuns, artifacts } from './lib/paths.mjs';
 import { readJson, readText, writeFileAtomic } from './lib/io.mjs';
 import { tryLoadState, loadState } from './lib/state.mjs';
-import { REVIEW_ROUNDS, EXTRA_ROUNDS, PHASES, TERMINAL_PHASES } from './lib/phases.mjs';
+import { REVIEW_ROUNDS, EXTRA_ROUNDS, TERMINAL_PHASES } from './lib/phases.mjs';
 import { summarise, scoreAgainstTargets } from './lib/telemetry.mjs';
-import { analyseTranscript, transcriptPathFor } from './lib/transcript.mjs';
+import { directorTier, analyseTranscript, analyseRoles, transcriptPathFor } from './lib/transcript.mjs';
 
 const { positional, flags } = parseArgs();
 const projectRoot = resolveProjectRoot(flags);
@@ -85,9 +85,12 @@ function renderFinal() {
   const outcome = terminal?.to ?? state.phase;
   p(`**Outcome:** ${outcome}${state.blocked ? ` — ${state.blocked}` : ''}` +
     (terminal ? '' : ' *(not terminal yet — regenerate this report after the final transition)*') + '  ');
+  const finished = terminal?.at ?? state.updatedAt;
   p(`**Started:** ${state.createdAt}  `);
-  p(`**Finished:** ${terminal?.at ?? state.updatedAt}  `);
-  p(`**Duration:** ${humanDuration(Date.parse(state.updatedAt) - Date.parse(state.createdAt))}`, '');
+  p(`**Finished:** ${finished}  `);
+  // The same clock as "Finished" — `updatedAt` moves on any later probe of a closed run, and a
+  // report regenerated hours after the transition printed a duration hours too long.
+  p(`**Duration:** ${humanDuration(Date.parse(finished) - Date.parse(state.createdAt))}`, '');
 
   p('## What was asked for', '', state.request?.description || '(not recorded)', '');
 
@@ -173,7 +176,11 @@ function renderFinal() {
   // is only ever observed, so the report is the one place it can be noticed at all.
   {
     const expected = state.config?.models?.director ?? 'fable';
-    const observed = state.observedDirectorModel ?? 'not observed';
+    // Measured fresh, not read from a field a hook may never have written. `observedDirectorModel`
+    // is stamped by the SubagentStop controller; a director that finished inside one dispatch never
+    // fires it, and the report would then say "not observed" about a tier the transcripts answer on
+    // demand. Same defect as the budget bound that was consulted once (§O14), one surface over.
+    const observed = directorTier(state).observed ?? state.observedDirectorModel ?? 'not observed';
     const effort = state.observedEffort ?? 'not observed';
     const configured = state.config?.effort?.default ?? 'high';
     p(`- Director tier: ${observed} (configured: ${expected}), effort ${effort}` +
@@ -210,7 +217,13 @@ function renderFinal() {
 
   // --- cost --------------------------------------------------------------------
   p('## Cost and work distribution', '');
-  p('Measured from the session transcript (per-model token usage including subagents), not estimated.', '');
+  // Tokens are measured; dollars are derived. Saying "not estimated" about the dollar figure
+  // over-claimed: these are subscription-billed sessions, so the money column is an API-list-price
+  // equivalent whatever the arithmetic — the honest label says which half is which.
+  p('Token counts are measured from the session transcript (per model, subagents included), not '
+    + 'estimated. Dollar figures are derived **standard-rate** API-price equivalents (cache reads '
+    + '×0.1, cache writes ×1.25, 1-hour-tier writes ×2; promotional prices deliberately not '
+    + 'applied), not an invoice.', '');
   if (measured?.byFamily && Object.keys(measured.byFamily).length) {
     p('| Tier | Messages | Output tokens | Cost | Share of cost |', '| --- | --- | --- | --- | --- |');
     for (const [family, b] of Object.entries(measured.byFamily)) {
@@ -220,6 +233,29 @@ function renderFinal() {
   } else {
     p(`Estimated $${usage.totals.costUsd.toFixed(2)} from recorded events; transcript measurement unavailable.`);
   }
+  // Cost by role and by term. The tier table above answers "did the pyramid hold?" — a question
+  // measurement showed regulates about a quarter of the bill (output tokens are 24–27% of cost).
+  // The largest line of the last production run was a *role*: the review adjudicator summed
+  // across dispatches, 36.7%, above the director — visible in no tier split. Read/write/generation
+  // are separated because their remedies differ: re-reading wants less carried context, cache
+  // re-writing wants fewer expiry windows or a cheaper tier.
+  try {
+    const roles = analyseRoles(transcriptPathFor(state), { since: state.createdAt })
+      .filter((r) => r.costUsd >= 0.005);
+    if (roles.length) {
+      p('', '### Cost by role', '');
+      p('| Role | Dispatches | Requests | Output tokens | Generation | Cache write | Cache read | Fresh input | Cost |',
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+      for (const r of roles) {
+        // Every term the total is made of, or the visible columns do not sum to Cost and the
+        // table teaches readers to distrust it. Fresh input is usually cents; it is shown anyway.
+        p(`| ${r.role} | ${r.dispatches} | ${r.messages} | ${r.outputTokens.toLocaleString()} | ` +
+          `$${r.generationUsd.toFixed(2)} | $${r.cacheWriteUsd.toFixed(2)} | $${r.cacheReadUsd.toFixed(2)} | ` +
+          `$${r.freshInputUsd.toFixed(2)} | $${r.costUsd.toFixed(2)} |`);
+      }
+    }
+  } catch { /* the role table is additive; a run whose transcripts are gone still gets a report */ }
+
   p('', 'Reference bands from the design intent (orientation only — nothing gates on these):', '');
   p('| Metric | Tier | Band | Observed | Within |', '| --- | --- | --- | --- | --- |');
   for (const row of scoreAgainstTargets(usage)) {

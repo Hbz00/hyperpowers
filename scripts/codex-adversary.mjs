@@ -30,9 +30,9 @@ import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './l
 import { artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { ensureDir, writeJson, writeFileAtomic, readJson, nowIso } from './lib/io.mjs';
 import { loadConfig } from './lib/config.mjs';
-import { REVIEW_ROUNDS, EXTRA_ROUNDS, ALL_ROUNDS } from './lib/phases.mjs';
+import { EXTRA_ROUNDS, ALL_ROUNDS, REVIEW_ROUNDS, PHASE_ORDER, phaseIndex } from './lib/phases.mjs';
 import { buildPack } from './lib/review-pack.mjs';
-import { loadState, mutateState } from './lib/state.mjs';
+import { loadState, mutateState, reviewedArtifactDigest, refuseIfEnded } from './lib/state.mjs';
 import { logEvent } from './lib/telemetry.mjs';
 import { validate } from './lib/validate.mjs';
 
@@ -46,6 +46,11 @@ if (typeof round !== 'string' || !ALL_ROUNDS[round]) {
   fail(`--round must be one of: ${Object.keys(ALL_ROUNDS).join(', ')}`);
 }
 
+// §S14, and before anything is spent: a review of a finished run has nowhere to be recorded, and
+// this verb is the one that costs real Codex quota to discover that.
+const ended = refuseIfEnded(projectRoot, runId);
+if (ended) fail(ended, 2);
+
 const config = loadConfig(projectRoot);
 const a = artifacts(projectRoot, runId);
 const spec = ALL_ROUNDS[round];
@@ -53,18 +58,75 @@ const spec = ALL_ROUNDS[round];
 // Spec §18 allows exactly one extra targeted review per artefact after a round-2 blocker. The
 // bound is enforced here rather than stated in a prompt, because "one more review" is precisely
 // the kind of limit an agent under pressure talks itself past.
-if (EXTRA_ROUNDS[round]) {
+//
+// A *replay* of a completed mandatory round is the same spend under a different spelling. The cap
+// used to bind only the `*-extra` names, so re-running `design-2` consumed nothing and could be
+// repeated indefinitely — run 9 replayed two rounds with `extraReviews` still `{}`, and a rerun
+// that comes back clean vacuously satisfies `adjudicated-<round>` for the findings it erased. The
+// first run of each mandatory round is free; every further review of the artefact, whatever it is
+// called, draws on the same §18 allowance.
+//
+// "Has this round ever completed" is asked of the archives as well as the canonical file. Reading
+// only the current file made a *failed* replay reset the answer: the completed attempt had been
+// archived, the failed record sat canonical, and the next success was treated as a free first
+// execution — so failure→success cycles walked around the cap indefinitely.
+const isReplay = readJson(a.review(round), null)?.status === 'completed'
+  || completedAttemptExists();
+
+// Only *completed* archived attempts make a replay: a failed attempt yielded no review, so
+// re-running it is the ordinary retry path, not a re-review — charging the allowance for an
+// infrastructure failure would block the legitimate route back to a working round.
+function completedAttemptExists() {
+  try {
+    return fs.readdirSync(a.reviewsDir)
+      .filter((f) => f.startsWith(`${round}.attempt`) && f.endsWith('.json'))
+      .some((f) => readJson(path.join(a.reviewsDir, f), null)?.status === 'completed');
+  } catch {
+    return false;
+  }
+}
+if (EXTRA_ROUNDS[round] || isReplay) {
   const used = loadState(projectRoot, runId).counters?.extraReviews?.[spec.artifact] ?? 0;
   const allowed = config.budgets.maxExtraReviewsPerArtifact;
   if (used >= allowed) {
     fail(
-      `The ${spec.artifact} artefact has already used its ${allowed} extra review round${allowed === 1 ? '' : 's'}. ` +
+      `The ${spec.artifact} artefact has already used its ${allowed} extra review round${allowed === 1 ? '' : 's'}` +
+        `${isReplay ? ` — and re-running the completed '${round}' counts as one` : ''}. ` +
         `Spec §18: if a critical blocker survives the extra round, the run goes to BLOCKED rather ` +
         `than reviewing indefinitely. Transition to BLOCKED with the surviving finding as the reason.`,
       7,
     );
   }
 }
+// A mandatory round is consumed by the phase that names it, so its **first** execution must
+// happen there: run early it reviews an artefact that is not finished, and the file it leaves
+// behind later satisfies the exit gate of a phase it never ran in — reproduced from PREFLIGHT.
+// A replay or a §18 extra round re-reads a *moved* artefact, and the places that legitimately
+// order one span the artefact's whole segment: its round-1 phase through the phase after its
+// round-2 (the lock, or FINAL_ACCEPTANCE), because the gate's own "state it or run an extra
+// round" offer is made at the lock, which has no edge back to remediation. The segment is
+// derived from the phase tables rather than declared, so a renamed phase cannot leave a stale
+// copy here.
+{
+  const phase = loadState(projectRoot, runId).phase;
+  const first = phaseIndex(REVIEW_ROUNDS[`${spec.artifact}-1`].phase);
+  const last = phaseIndex(REVIEW_ROUNDS[`${spec.artifact}-2`].phase) + 1;
+  const segment = PHASE_ORDER.slice(first, last + 1);
+  const allowed = (EXTRA_ROUNDS[round] || isReplay) ? segment : [spec.phase];
+  if (!allowed.includes(phase)) {
+    fail(
+      `Round '${round}' cannot run while the run is in ${phase}. ` +
+        (EXTRA_ROUNDS[round] || isReplay
+          ? `A ${isReplay ? 'replay' : 'targeted extra round'} of the ${spec.artifact} may run ` +
+            `between ${segment[0]} and ${segment.at(-1)} — the segment where a gate can order one.`
+          : `Its first execution belongs to ${spec.phase}, the phase whose exit gate consumes it: ` +
+            `reviewed early, the round reads an artefact that is not finished, and its file later ` +
+            `satisfies a gate it never ran in.`),
+      7,
+    );
+  }
+}
+
 const outputSchemaPath = path.join(PLUGIN_ROOT, 'schemas', 'codex-review-output.schema.json');
 const outputSchema = readJson(outputSchemaPath, null);
 if (!outputSchema) fail(`Missing review output schema at ${outputSchemaPath}`);
@@ -79,6 +141,13 @@ async function main() {
   ensureDir(a.reviewsDir);
   ensureDir(a.packsDir);
 
+  // Provenance is never overwritten. A rerun used to replace the review JSON, the pack, the
+  // prompt and the raw reviewer output in place — so a blocking finding could be erased by
+  // running the same command again, and run 9's record holds an adjudication for a finding no
+  // surviving review contains. Whatever this invocation produces, the previous attempt's files
+  // are moved aside first, under a name every later reader can find.
+  archiveExistingRound();
+
   const pack = buildPack(projectRoot, runId, round, config.codex.reviewPackMaxBytes);
   if (pack.bytes < 200) {
     fail(`Review pack for round '${round}' is empty — the artefact under review does not exist yet.`);
@@ -92,21 +161,37 @@ async function main() {
   const prompt = buildPrompt(round, spec, pack);
   writeFileAtomic(promptPath, prompt);
 
+  // The version under review is the version the pack was built from — computed here, not after
+  // the reviewer returns. For a document the difference is seconds; for the implementation the
+  // review takes minutes, and a digest taken afterwards would describe a tree the reviewer never
+  // read (run 9: pack at 15:12, review back at 15:14).
+  const artifactDigest = reviewedArtifactDigest(projectRoot, runId, spec.artifact);
+
   // --- model routing with the single documented fallback (spec §8.6) ----------
   const attempts = [];
   let model = spec.model;
   let effort = spec.effort;
   let review = null;
+  let currentPrompt = prompt;
+  const retriesUsed = new Map(); // per model — a retry is a property of the model that failed
 
   while (model) {
-    const result = await invokeCodex({ model, effort, prompt, packPath });
-    attempts.push({ model, effort, ok: result.ok, reason: result.reason, ms: result.ms, logPath: result.logPath });
+    const isRetry = (retriesUsed.get(model) ?? 0) > 0;
+    const result = await invokeCodex({ model, effort, prompt: currentPrompt, packPath });
+    attempts.push({
+      model, effort, ok: result.ok, reason: result.reason, ms: result.ms, logPath: result.logPath,
+      ...(isRetry ? { retry: true } : {}),
+    });
 
     if (result.ok) {
-      review = finalise(result.value, model, effort, attempts);
+      review = finalise(result.value, model, effort, attempts, artifactDigest);
       break;
     }
 
+    // Every failed attempt is classified the same way, retries included. The retry's
+    // classification used to be discarded — only `retry.ok` was read — so a primary model that
+    // failed transiently and then reported itself unavailable on the retry never reached this
+    // hop, and the round failed where the documented Sol → Luna fallback should have run.
     if (result.classification === 'model_unavailable') {
       const next = config.codex.fallback[model] ?? null;
       // Accept both the object form and a bare model id, so an older `.hyperpowers.json`
@@ -121,12 +206,17 @@ async function main() {
       mutateState(projectRoot, runId, (s) => { s.counters.fallbacks += 1; });
       model = nextModel;
       effort = nextEffort;
+      // The fallback model starts from the full pack, not from whatever half-size retry pack the
+      // failed model may have left on disk.
+      writeFileAtomic(packPath, pack.text);
+      currentPrompt = prompt;
+      writeFileAtomic(promptPath, prompt);
       continue;
     }
 
-    // A transient or malformed-output failure earns exactly one retry, with a smaller pack
-    // (spec §23 Risk 5: reduce the scope rather than repeat the same oversized request).
-    if (attempts.filter((x) => x.model === model).length <= config.codex.retries) {
+    // A transient or malformed-output failure earns exactly one retry per model, with a smaller
+    // pack (spec §23 Risk 5: reduce the scope rather than repeat the same oversized request).
+    if ((retriesUsed.get(model) ?? 0) < config.codex.retries) {
       const smaller = buildPack(projectRoot, runId, round, Math.floor(config.codex.reviewPackMaxBytes / 2));
       // The retry halves the budget, which makes losing mandatory context *more* likely than on
       // the first attempt — so this is precisely where the check may not be skipped. Sending it
@@ -134,21 +224,20 @@ async function main() {
       // is far more convincing than one that failed.
       const retryGaps = mandatoryGaps(smaller);
       if (retryGaps.length) {
+        // `skipped` keeps this decision on the record while keeping it out of `codexInvocations`:
+        // no process was launched, and a counter named "invocations" that counted decisions
+        // overstated every round that ever declined a retry.
         attempts.push({
-          model, effort, ok: false, retry: true, ms: 0,
+          model, effort, ok: false, retry: true, skipped: true, ms: 0,
           reason: `retry not attempted: the half-size pack could not carry ${retryGaps.join('; ')}`,
         });
         break;
       }
+      retriesUsed.set(model, (retriesUsed.get(model) ?? 0) + 1);
       writeFileAtomic(packPath, smaller.text);
-      const retryPrompt = buildPrompt(round, spec, smaller);
-      writeFileAtomic(promptPath, retryPrompt);
-      const retry = await invokeCodex({ model, effort, prompt: retryPrompt, packPath });
-      attempts.push({ model, effort, ok: retry.ok, reason: retry.reason, ms: retry.ms, retry: true, logPath: retry.logPath });
-      if (retry.ok) {
-        review = finalise(retry.value, model, effort, attempts);
-        break;
-      }
+      currentPrompt = buildPrompt(round, spec, smaller);
+      writeFileAtomic(promptPath, currentPrompt);
+      continue;
     }
     break;
   }
@@ -159,6 +248,12 @@ async function main() {
       reason: attempts.at(-1)?.reason ?? 'unknown',
     };
     writeJson(a.review(round), record);
+    // Failed attempts spent real Codex quota; counting them only on success made
+    // `codexInvocations` — the figure cost and audit read — silently understate every round that
+    // ever failed.
+    try {
+      mutateState(projectRoot, runId, (s) => { s.counters.codexInvocations += attempts.filter((x) => !x.skipped).length; });
+    } catch { /* accounting must not mask the failure being reported */ }
     logEvent(projectRoot, runId, { type: 'codex_review', round, status: 'failed', attempts: attempts.length });
     // Spec §3.2/§8.6: no silent substitution. A review that cannot run is a blocking fact.
     fail(
@@ -176,8 +271,11 @@ async function main() {
       at: review.at, model: review.model, effort: review.effort, verdict: review.verdict,
       findings: review.findings.length, blocking: review.findings.filter((f) => f.blocking).length,
     };
-    s.counters.codexInvocations += attempts.length;
-    if (EXTRA_ROUNDS[round]) {
+    s.counters.codexInvocations += attempts.filter((x) => !x.skipped).length;
+    // A replay of a completed mandatory round consumes the same §18 allowance as a `*-extra`
+    // round — see the cap check above. Counting only the `-extra` spelling left the bound
+    // enforceable for one of four spellings per artefact.
+    if (EXTRA_ROUNDS[round] || isReplay) {
       s.counters.extraReviews = { ...(s.counters.extraReviews ?? {}), [spec.artifact]: (s.counters.extraReviews?.[spec.artifact] ?? 0) + 1 };
     }
   });
@@ -205,28 +303,56 @@ async function main() {
 }
 
 /**
- * Mandatory context this pack failed to carry in full.
- *
- * A targeted round exists to verify corrections against the findings that prompted them, so the
- * previous round's findings and their adjudication are marked `mandatory` when the pack is
- * assembled. The size cap protects against a review that never returns; it must not quietly
- * redefine what is being reviewed.
- *
- * **Truncated counts, not just dropped.** Mandatory sections sit at priority -1, so the budget
- * truncates them rather than dropping them — which means the failure this guard was written for
- * arrives through the branch it was not checking. A reviewer handed half the findings verifies
- * half the corrections and reports on the half it saw; the gate then reads a completed round.
- * The pack does print a coverage warning, but a warning is a request that the reviewer disclose
- * the gap, not a guarantee that the round did its job.
- */
-/**
  * Context this round cannot run without, and did not get.
  *
- * Scoped to targeted rounds until a 120-file change was simulated: the working-tree diff sat at
- * priority 1, was dropped rather than truncated, and a *general* implementation round would have
- * returned a verdict having seen the file list, the statistics and the evidence matrix — and no
- * code — with nothing failing. A general round without its subject is not a weaker review either.
+ * The size cap protects against a review that never returns; it must not quietly redefine what is
+ * being reviewed. Two ways it did:
+ *
+ *  - **Truncated, not only dropped.** Mandatory sections sit at priority -1 precisely so the budget
+ *    truncates them rather than dropping them — which routed the common failure through the one
+ *    branch this guard was not checking. A reviewer handed half the previous round's findings
+ *    verifies half the corrections and reports on the half it saw, and the gate reads a completed
+ *    round. The pack prints a coverage warning, but a warning asks the reviewer to disclose the gap;
+ *    it does not guarantee the round did its job.
+ *  - **General rounds too.** This was scoped to targeted rounds until a 120-file change was
+ *    simulated: the working-tree diff sat at priority 1, was dropped rather than truncated, and a
+ *    *general* implementation round would have returned a verdict having seen the file list, the
+ *    statistics and the evidence matrix — and no code — with nothing failing.
  */
+/**
+ * Move a previous attempt's artefacts aside before this invocation writes anything.
+ *
+ * The review JSON, the pack, the prompt and the raw reviewer outputs all wrote to fixed,
+ * round-named paths, so a rerun destroyed the only copy of what a previous round found — for an
+ * unadjudicated finding, without trace. Renamed rather than copied: every downstream reader
+ * resolves `a.review(round)` and keeps reading the current attempt; the archive is for audit.
+ * Failed attempts are archived too — a dead replay must not destroy a completed round's record,
+ * and a failed record is provenance in its own right.
+ */
+function archiveExistingRound() {
+  let existing;
+  try {
+    existing = fs.statSync(a.review(round)).isFile();
+  } catch {
+    existing = false;
+  }
+  if (!existing) return;
+  let n = 1;
+  while (fs.existsSync(path.join(a.reviewsDir, `${round}.attempt${n}.json`))) n += 1;
+  try {
+    fs.renameSync(a.review(round), path.join(a.reviewsDir, `${round}.attempt${n}.json`));
+    for (const f of fs.readdirSync(a.packsDir)) {
+      if (f === `${round}.md` || f === `${round}.prompt.md` || f.startsWith(`${round}.md.`)) {
+        fs.renameSync(path.join(a.packsDir, f), path.join(a.packsDir, `attempt${n}.${f}`));
+      }
+    }
+  } catch (err) {
+    // An archive that cannot be written must not block the round — but overwriting evidence
+    // silently is the defect this exists to fix, so failing loudly is the only honest fallback.
+    fail(`Cannot archive the previous '${round}' attempt before re-running it: ${err.message}`);
+  }
+}
+
 function mandatoryGaps(pack) {
   return [
     ...(pack.droppedMandatory ?? []).map((t) => `${t} (dropped entirely)`),
@@ -250,7 +376,7 @@ function mandatoryGapMessage(roundName, gaps) {
   );
 }
 
-function finalise(value, model, effort, attempts) {
+function finalise(value, model, effort, attempts, artifactDigest) {
   // Ids arrive reviewer-local (F1, 1, DESIGN-001…). Normalising them to a stable, artefact
   // scoped form is what lets round two verify round one's findings by id (spec §23 Risk 4).
   // Ids must also be unique within the round: a reviewer that returns two findings labelled
@@ -268,6 +394,12 @@ function finalise(value, model, effort, attempts) {
   });
   return {
     round, status: 'completed', artifact: spec.artifact, kind: spec.kind,
+    // The version of the artefact this verdict is about — computed when the pack was built, not
+    // here: the reviewer read the version the pack carried, and for the implementation the tree
+    // can legitimately move while the review runs. Without it a review proves only that *some*
+    // review happened, and the gate cannot see that the artefact moved underneath it — see
+    // `reviewedArtifactDigest`.
+    artifactDigest,
     // The model and effort that actually answered, which may differ from the round's routing
     // after a fallback. Completion condition §13.12 compares the two.
     model, effort, requestedModel: spec.model, requestedEffort: spec.effort, at: nowIso(),

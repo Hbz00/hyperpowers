@@ -16,7 +16,7 @@ written against specific instructions that could change.
 | `<HARD-GATE>`: present a design and get **user approval** before any implementation | The `DESIGN_LOCK` gate: two Codex rounds, full adjudication, no open blocker, then the director's verdict | The gate still exists — it is no longer human. This is the substitution the whole architecture rests on. |
 | Step 6: write the design doc **and commit** | Write it to the run directory; never commit | Git is read-only (spec §14). The run directory also keeps orchestration out of the diff Codex reviews (spec §20). |
 | Step 8: **user reviews the written spec** | Codex rounds 1–2 review it adversarially | An independent contradictor with clean context finds more than a tired human skimming a document. |
-| Ask questions **one at a time** across messages | Batch questions through `AskUserQuestion` inside one turn | Multi-message dialogue ends the turn, which clears the director's model pin (ledger B1). This is a hard harness constraint, not a preference. |
+| Ask questions **one at a time** across messages | Batch them into one question packet the main thread renders | The director is a subagent and has no `AskUserQuestion` at all (ledger R1), and every park costs a round trip. This is a hard harness constraint, not a preference. |
 
 Everything else in the skill is kept: explore context first, propose alternatives with
 trade-offs, scale the design to the problem, self-review for placeholders and contradictions.

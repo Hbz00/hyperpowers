@@ -36,6 +36,15 @@ is an existing refresh path — cite paths and line numbers" does not.
 
 Launch only `hyperpowers:*` agents.
 
+**Every dispatch you make is synchronous. Never pass `run_in_background: true`.** A backgrounded
+child's result never comes back to you — "Async agent launched successfully" is the whole tool
+result — and `TaskOutput` is removed from every subagent, so there is no tool with which to collect
+it afterwards. A child you cannot collect is a child you wait on forever. The PreToolUse hook now
+denies that parameter to any subagent caller. It exists because a coordinator at exactly your depth
+backgrounded its dispatches in run 9 and nothing was ever collected from them. To run work
+concurrently, issue several `Agent` calls in **one message**: they execute at the same time, your
+turn does not end until all of them return, and every result lands in your context.
+
 ## What the design must contain
 
 - **The problem**, stated so that someone could disagree with it.
@@ -74,7 +83,12 @@ the existing system.
 Escalate to Fable only for product intent, scope, or a structurally irreversible trade-off. Build
 the packet in the format of `prompts/fable-decision-packet.md` — 500–1000 tokens, at most three
 options, one recommendation, evidence as paths not logs — and put the verdict on record by
-dispatching the director:
+dispatching `hyperpowers:fable-gate-reviewer` — **never the director itself**, which only
+the main thread may dispatch. A live run measured what happens otherwise: this same
+paragraph named the director as the thing to dispatch while its example named the gate reviewer, an
+adjudicator followed the prose, and a second `hyperpowers-director` was spawned at depth 3.
+It could not delegate at all (the harness caps dispatching at depth 3) and it reported as
+the director to every hook, so the run's own counters lost track of which agent was real:
 
 ```
 Agent → hyperpowers:fable-gate-reviewer   (pass the packet as the prompt)

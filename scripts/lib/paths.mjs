@@ -19,6 +19,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { sha256, ensureDir, readJson, writeJson } from './io.mjs';
 
 const PLUGIN_NAME = 'hyperpowers';
@@ -46,7 +47,11 @@ function isOurPluginRoot(dir) {
  * not running at all.
  */
 export const PLUGIN_ROOT = (() => {
-  const selfLocated = path.resolve(new URL('../..', import.meta.url).pathname);
+  // `fileURLToPath`, never `.pathname`: a file URL percent-encodes, so an install path containing
+  // a space self-located to `.../hyperpowers%20stage/...`, the manifest check failed, and the
+  // whole point of self-location — surviving a wrong or foreign environment — failed exactly when
+  // the path was unusual. `fileURLToPath` also carries Windows drive-letter semantics.
+  const selfLocated = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
   if (isOurPluginRoot(selfLocated)) return selfLocated;
   // Only if this file is somewhere unexpected does the environment get a say — and even then
   // only when it points at a directory carrying our manifest.
@@ -61,13 +66,6 @@ function ownsDataDir(dir) {
   return base === PLUGIN_NAME || base.startsWith(`${PLUGIN_NAME}-`);
 }
 
-/**
- * The `hyperpowers-*` data directory sitting alongside some other plugin's.
- *
- * Newest first when several exist — a stale directory from an earlier install must not outrank
- * the one in use. `-fallback` is excluded: it is what we resolve to when nothing else is found,
- * so letting it win here would make the degraded path sticky.
- */
 /** This plugin installation's stable identity, used to tell our data directory from another's. */
 function pluginIdentity() {
   try { return fs.realpathSync(PLUGIN_ROOT); } catch { return PLUGIN_ROOT; }
@@ -92,6 +90,9 @@ function markedPluginRoot(dir) {
  * created minutes earlier by a `plugin install` outranked the one holding every run, and
  * `describeDataRoot()` reported it as trusted. §O1's failure through a second door: the CLI writes
  * into one directory while the hooks read the other, and the run still looks healthy.
+ *
+ * `-fallback` is excluded: it is what we resolve to when nothing else is found, so letting it win
+ * here would make the degraded path sticky.
  */
 function siblingCandidates(parent) {
   let entries;
@@ -292,12 +293,26 @@ export function runsDir(projectRoot) {
   return path.join(projectDir(projectRoot), 'runs');
 }
 
+/**
+ * The last line of defence for an id that reaches a path.
+ *
+ * The CLI already refuses malformed ids loudly (`requireSafeId`); this quarantines whatever
+ * slips past a future call site. It must **never throw**: `activeRunId()` is on `git-policy`'s
+ * fail-closed path, and one unreadable pointer file once made that hook deny every Bash, Write
+ * and Edit call in the project (see `activeRunId`) — a thrown id would do the same. A
+ * quarantined name resolves inside the intended directory and matches no real run, so a bad id
+ * degrades to "no run found" instead of to relocated records or a denied session.
+ */
+function safePathId(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(String(value ?? '')) ? String(value) : '_invalid';
+}
+
 export function runDir(projectRoot, runId) {
-  return path.join(runsDir(projectRoot), runId);
+  return path.join(runsDir(projectRoot), safePathId(runId));
 }
 
 export function sessionPointerPath(projectRoot, sessionId) {
-  return path.join(projectDir(projectRoot), 'sessions', `${sessionId}.json`);
+  return path.join(projectDir(projectRoot), 'sessions', `${safePathId(sessionId)}.json`);
 }
 
 /**
@@ -389,6 +404,11 @@ export function artifacts(projectRoot, runId) {
     plan: path.join(base, 'plan.md'),
     tasks: path.join(base, 'tasks.json'),
     evidence: path.join(base, 'evidence.json'),
+    // Park-and-relay (§S6): the director cannot call `AskUserQuestion` (§R1), so it writes the
+    // question here and stops. The main thread renders it and writes the answer back into the same
+    // file. One file, two writers, so a question and its answer can never drift apart.
+    question: path.join(base, 'question.json'),
+    publish: path.join(base, 'publish.json'),
     locks: path.join(base, 'locks.json'),
     telemetry: path.join(base, 'telemetry.jsonl'),
     reviewsDir: path.join(base, 'reviews'),

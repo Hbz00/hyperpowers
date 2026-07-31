@@ -10,6 +10,40 @@
 import path from 'node:path';
 import { readJson } from './io.mjs';
 
+/**
+ * The subagent the director runs as.
+ *
+ * `/hyperpowers:feature` dispatches it; nothing about the user's session decides its tier. A
+ * **subagent's** `effort:` pin holds unconditionally (§S3 T26) and its `model:` holds against the
+ * session default (outranked only by a per-invocation argument and `CLAUDE_CODE_SUBAGENT_MODEL`,
+ * §V2) — unlike a skill's pins (§Q8) and a *main-session* agent's effort (§Q16 T1b/T3), which is
+ * why the director is a subagent rather than a launch flag, and why the PREFLIGHT transition
+ * check reads the *observed* tier rather than trusting the declaration. This name is the contract
+ * between `skills/feature`, the file in `agents/`, and every check that verifies the run is the
+ * system it claims to be, so it exists once and is imported, never spelled out again.
+ */
+export const DIRECTOR_AGENT = 'hyperpowers-director';
+
+/**
+ * Agent names arrive namespaced from the harness (`hyperpowers:sonnet-researcher`, measured) but
+ * may be written bare in frontmatter and payloads. Compare through here, never directly.
+ */
+export function bareAgentName(name) {
+  const s = String(name ?? '');
+  return s.slice(s.lastIndexOf(':') + 1);
+}
+
+/**
+ * The block at which a controller yields to `SUSPENDED`, one implementation for both loops.
+ *
+ * The main thread and the director each have their own counter and their own harness cap (§R6),
+ * but the *rule* for when to yield is one rule — and a rule copied into two files is a rule that
+ * gets fixed in one of them. §S2 is what happens when this number stops describing reality.
+ */
+export function softBlockCap(config) {
+  return Math.max(1, config.stop.blockCap - config.stop.softCapMargin);
+}
+
 export const DEFAULTS = Object.freeze({
   models: {
     director: 'fable',
@@ -20,12 +54,22 @@ export const DEFAULTS = Object.freeze({
   /**
    * Spec §7.4. `high` is also the harness default for all three models (ledger A5), so this
    * profile is mainly about *when* to escalate, not about overriding a default.
+   *
+   * **Effort is never written into the user's settings**, even though §Q16 T6b measured that
+   * `effortLevel` there would pin it: that file is project-scoped and would re-set the reasoning
+   * effort of every ordinary session in the repository, which is the disproportion that demoted
+   * `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` to optional. It does not need to be. Each agent declares its
+   * own `effort:` and a subagent honours it (§S3 T26), so this value is what the *director's*
+   * declaration is checked against — not something anybody has to install.
+   *
+   * `maxEnabled` and `mediumEnabled` used to sit here. Nothing read them — not a gate, not a hook,
+   * not a prompt — so they were two booleans a user could set and watch have no effect, which is
+   * the same defect as a bound that does not bind. Removed rather than wired: there is no rung
+   * above `xhigh` this project routes to, and `medium` is a demotion nothing asks for.
    */
   effort: {
     default: 'high',
     escalation: 'xhigh',
-    maxEnabled: false,
-    mediumEnabled: false,
   },
 
   codex: {
@@ -49,27 +93,41 @@ export const DEFAULTS = Object.freeze({
   },
 
   /**
-   * Spec §18. Every bound listed here is enforced by the Stop controller, which transitions the
-   * run to `BUDGET_EXCEEDED` rather than letting it degrade quietly.
+   * Bounds on the **shape of the work**, not on how much a run may spend.
    *
-   * `maxAttemptsPerTask` is the exception: it bounds a decision the coordinator makes inside a
-   * single turn, so it is stated in the routing policy and surfaced in the run report, but no
-   * hook sits between the coordinator and its own retry. It is listed in `ADVISORY_BOUNDS` so
-   * `/hyperpowers:status` can say which bounds are mechanical and which are instructions — an
-   * inert bound that looks mechanical is worse than an honest advisory one.
+   * There used to be five more here — `maxCostUsd`, `maxDurationMs`, `maxWorkPackages`,
+   * `maxSubagents`, `maxFallbacks` — and crossing any of them moved the run to `BUDGET_EXCEEDED`.
+   * That phase was terminal with no successors, and `resume-run.mjs` refuses every terminal phase
+   * ("A terminal run is not resumable", exit 8). So the bound did not cap a run, it **destroyed**
+   * one: three quarters of the way through a feature, with the design locked, the plan locked and
+   * the packages built, the whole thing became unfinishable. Worse, the Stop controller printed
+   * *"Raise it in .hyperpowers.json and `/hyperpowers:resume`"* — a remedy the resume path rejects.
    *
-   * `maxExtraReviewsPerArtifact` used to be advisory too, for a worse reason: the extra round
-   * had no implementation at all, so the bound governed something nobody could do. Now that
-   * `<artifact>-extra` is a real round, the adapter enforces it.
+   * A cost ceiling that converts an expensive result into no result is not a safety feature. What
+   * remains below are bounds a run can actually act on, and none of them ends anything:
+   * `maxExtraReviewsPerArtifact` and `maxFilesPerWorkPackage` are gate-enforced, and
+   * `maxAttemptsPerTask` is advisory — stated to the coordinator, enforced by nothing, and
+   * `ADVISORY_BOUNDS` below says so. (This passage used to call two of them "retry breakers",
+   * which overstated the advisory one — a §U-class claim sitting inside the very rationale for
+   * removing the ceiling.) Spend and duration are measured and reported — see `costNoticeUsd` and
+   * `durationNoticeMs` — because knowing is useful and dying is not.
    */
   budgets: {
-    maxCostUsd: 100,
-    maxDurationMs: 6 * 60 * 60 * 1000,
-    maxWorkPackages: 80,
+    /**
+     * Above this, every transition says so. Informational only: nothing stops, nothing refuses.
+     * The number also renders on the director's status-line row, so the person paying sees it
+     * without polling — `/hyperpowers:abort` is always available.
+     */
+    costNoticeUsd: 75,
+    /**
+     * Same shape for wall-clock. The spec asks for a configurable duration control and the cost
+     * ceiling's removal (§S1) took the duration one with it, leaving no substitute at all —
+     * although §K6 records duration as the one breaker that ever actually worked. Six hours sits
+     * above both completed production runs (3h53m, 5h19m); a healthy run should never hear this.
+     */
+    durationNoticeMs: 6 * 60 * 60 * 1000,
     maxAttemptsPerTask: 3,
     maxExtraReviewsPerArtifact: 1,
-    maxFallbacks: 3,
-    maxSubagents: 200,
     /**
      * Files one work package may own, enforced by the plan gate.
      *
@@ -84,12 +142,32 @@ export const DEFAULTS = Object.freeze({
 
   stop: {
     /**
-     * The harness caps consecutive Stop-hook blocks (ledger D4: default 8, raised via
-     * `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`). Hyperpowers yields `softCapMargin` blocks early so a
-     * run ends on a clean, resumable `SUSPENDED` state rather than being cut off mid-phase.
+     * The harness's real cap, not the one we wish for.
+     *
+     * This defaulted to **200** — the value a mandatory setup step used to write into the project's
+     * `.claude/settings.json` as `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`. The harness's own default is
+     * **8** (ledger D4, reconfirmed on `SubagentStop` in §Q17 T20). So in any session where that
+     * env var was not in force — which is now every session, since nothing writes settings any
+     * more — the controller computed `softCap = 200 - 4 = 196`, never reached it, never yielded,
+     * and the harness truncated the turn at 8 with no `SUSPENDED` state and nothing to resume.
+     *
+     * The mechanism built to make truncation graceful was inert exactly when it was needed. A
+     * bound that does not bind is this codebase's signature defect; a bound that describes an
+     * environment that is not the one you are running in is the same defect wearing a number.
+     *
+     * `loadConfig()` still raises this from `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` when it *is* set, so
+     * a session launched with a higher cap gets the higher soft cap automatically.
      */
-    blockCap: 200,
-    softCapMargin: 4,
+    blockCap: 8,
+    /**
+     * Blocks held back so the yield happens *before* the harness truncates.
+     *
+     * The margin absorbs disagreement between this counter and the harness's — ours resets on a
+     * new `prompt_id`, theirs on the turn actually ending. Two is enough for an off-by-one and a
+     * spare. It was 4, which was harmless against a cap of 200 and would surrender **half** the
+     * budget against the real cap of 8.
+     */
+    softCapMargin: 2,
     /**
      * Consecutive no-progress cycles before each escalation step (spec §16.3), and the shortest
      * time a "cycle" may be.
@@ -149,30 +227,41 @@ export const GATE_ENFORCED_BOUNDS = Object.freeze({
 });
 
 /**
- * Which bound, if any, this run has passed — one implementation, used at every checkpoint.
+ * What this run has spent, and whether that is worth mentioning. **Never a reason to stop.**
  *
- * §K6 found `maxCostUsd` inert because nothing produced a cost figure, and fixed the producer.
- * The first real run then showed the mirror image: the figure exists, and the breaker is
- * *consulted* only inside the Stop controller. That controller ran **once** in 86 minutes,
- * because a healthy run spends the whole turn dispatching subagents and never tries to end it.
- * The bound was therefore evaluated once, near the start, and never again across nineteen phase
- * transitions. A budget checked once is not a budget, which is exactly what §K6 said about a budget
- * with no producer. (The figure it was compared against was also inflated ~2× by the row-summing
- * defect of §P7, so the run it was drawn from never actually approached its limit — a bound that is
- * neither consulted nor correctly measured fails twice over.)
+ * This replaces `budgetOverrun()`, which returned the name of a breached bound and whose callers
+ * moved the run to `BUDGET_EXCEEDED`. Two measurements killed that design rather than one:
  *
- * Living here rather than in the Stop controller is the point: every caller that can plausibly
- * notice — the controller, and each phase transition — asks the same question of the same code.
+ *   1. It did not work. The breaker was consulted from the Stop controller, which ran **once** in
+ *      an 86-minute run (§O14) — evaluated near the start and never again across nineteen phase
+ *      transitions. Adding the transition call site fixed the frequency but not the next problem.
+ *   2. It was worse than not working. `BUDGET_EXCEEDED` is terminal with no successors, and
+ *      `resume-run.mjs` refuses every terminal phase ("A terminal run is not resumable", exit 8).
+ *      A run that crossed the line three quarters of the way through could not be continued at
+ *      any price — while the Stop controller told the user to raise the bound and resume.
+ *
+ * So the answer to "this is costing a lot" is now to say so, every transition, and let the person
+ * paying decide. `/hyperpowers:abort` was always the honest version of this feature.
  */
-export function budgetOverrun({ config, state, elapsedMs, measuredCost }) {
-  const c = state?.counters ?? {};
-  const b = config.budgets ?? {};
-  if (elapsedMs > b.maxDurationMs) return 'maxDurationMs';
-  if (measuredCost > b.maxCostUsd) return 'maxCostUsd';
-  if ((c.workPackages ?? 0) > b.maxWorkPackages) return 'maxWorkPackages';
-  if ((c.subagentsCompleted ?? 0) > b.maxSubagents) return 'maxSubagents';
-  if ((c.fallbacks ?? 0) > b.maxFallbacks) return 'maxFallbacks';
-  return null;
+export function costNotice({ config, measuredCost }) {
+  const threshold = config?.budgets?.costNoticeUsd;
+  if (!Number.isFinite(threshold) || !Number.isFinite(measuredCost) || measuredCost <= threshold) return null;
+  return `This run has spent $${measuredCost.toFixed(2)}, past the $${threshold} notice threshold. `
+    + `Nothing is stopping — this is information, not a limit. `
+    + `Use /hyperpowers:abort if it is no longer worth finishing.`;
+}
+
+/** Wall-clock sibling of `costNotice`: reports, never stops. Evaluated at the same checkpoints. */
+export function durationNotice({ config, startedAt, now = Date.now() }) {
+  const threshold = config?.budgets?.durationNoticeMs;
+  const started = Date.parse(startedAt ?? '');
+  if (!Number.isFinite(threshold) || !Number.isFinite(started)) return null;
+  const elapsed = now - started;
+  if (elapsed <= threshold) return null;
+  const hours = (elapsed / 3_600_000).toFixed(1);
+  return `This run has been going ${hours}h, past the ${(threshold / 3_600_000).toFixed(1)}h notice `
+    + `threshold. Nothing is stopping — this is information, not a limit. `
+    + `Use /hyperpowers:abort if it is no longer worth finishing.`;
 }
 
 /** Every configured bound, flattened, each labelled with what actually enforces it. */
@@ -185,10 +274,15 @@ export function describeBounds(config) {
     key,
     {
       limit,
-      enforcement: ADVISORY_BOUNDS.includes(key)
-        ? 'advisory — stated to the coordinator, not enforced by a hook'
-        : GATE_ENFORCED_BOUNDS[key]
-          ?? 'mechanical — the Stop hook transitions the run to BUDGET_EXCEEDED',
+      // The fallback used to read "the Stop hook transitions the run to BUDGET_EXCEEDED". Nothing
+      // does that any more, and a label naming an enforcer that no longer exists is worse than no
+      // label — `/hyperpowers:status` would report a bound as mechanical while nothing enforced it.
+      enforcement: key === 'costNoticeUsd' || key === 'durationNoticeMs'
+        ? 'informational — reported at every transition, never enforced'
+        : ADVISORY_BOUNDS.includes(key)
+          ? 'advisory — stated to the coordinator, not enforced by a hook'
+          : GATE_ENFORCED_BOUNDS[key]
+            ?? 'advisory — no mechanism ends a run for crossing it',
     },
   ]));
 }
@@ -204,10 +298,6 @@ function deepMerge(base, override) {
   return out;
 }
 
-/**
- * Load effective config. Project overrides live in `.hyperpowers.json` at the project root —
- * a normal, reviewable file rather than hidden state.
- */
 /**
  * Settings a project file may never set, because they are the guarantees rather than the tuning.
  *
@@ -250,9 +340,39 @@ function stripImmutable(overrides) {
       delete clone[group][key];
     }
   }
+
+  // Finite is not safe. A *type*-valid override of these three silently disables or inverts a
+  // safety mechanism — each reproduced against the real controllers: `stop.stallBlockAt: 0`
+  // moved a run to terminal BLOCKED on the first SubagentStop firing; a zero-or-negative
+  // `stop.softCapMargin` pushed the soft cap past the harness's real ceiling of 8, so the run
+  // was truncated instead of suspending resumably (§S2, reached through the config file); and a
+  // `codex.timeoutMs` above 2^31-1 is clamped by Node to **1 ms**, turning "effectively no
+  // timeout" into an instant SIGKILL of every review. Rejected back to the default, and
+  // reported: a clamp nobody can see is just a second silent restoration.
+  const RANGES = [
+    ['stop', 'stallBlockAt', (v) => Number.isInteger(v) && v >= 1,
+      'must be an integer >= 1 — at 0 the first controller firing blocks a healthy run, terminally'],
+    ['stop', 'softCapMargin', (v) => Number.isInteger(v) && v >= 1,
+      'must be an integer >= 1 — zero or negative defeats the resumable yield below the harness cap'],
+    ['codex', 'timeoutMs', (v) => v > 0 && v <= 2 ** 31 - 1,
+      'must be in (0, 2^31-1] — Node clamps larger delays to 1 ms, an instant kill of every review'],
+  ];
+  for (const [group, key, ok, why] of RANGES) {
+    const value = clone?.[group]?.[key];
+    if (typeof value !== 'number' || ok(value)) continue;
+    rejected.push(`${group}.${key} (${JSON.stringify(value)} ${why})`);
+    delete clone[group][key];
+  }
   return { clone, rejected };
 }
 
+/** The harness's own consecutive-block ceiling — measured (§D4, §Q17 T20), not configurable here. */
+const HARNESS_BLOCK_CAP = 8;
+
+/**
+ * Load effective config. Project overrides live in `.hyperpowers.json` at the project root —
+ * a normal, reviewable file rather than hidden state.
+ */
 export function loadConfig(projectRoot) {
   const raw = readJson(path.join(projectRoot, '.hyperpowers.json'), null);
   const { clone: overrides, rejected } = raw ? stripImmutable(raw) : { clone: null, rejected: [] };
@@ -262,47 +382,59 @@ export function loadConfig(projectRoot) {
   const envCap = Number(process.env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP);
   if (Number.isFinite(envCap) && envCap > 0) {
     config = deepMerge(config, { stop: { blockCap: envCap } });
+  } else if (config.stop.blockCap > HARNESS_BLOCK_CAP) {
+    // The harness honours 8 consecutive blocks (§D4, reconfirmed §Q17 T20) whatever this number
+    // says. A project override of 200 — the value this project itself once shipped, still visible
+    // in old docs for anyone to copy — re-created §S2 exactly: the soft cap was never reached, no
+    // SUSPENDED was recorded, and the harness truncated the turn with nothing to resume.
+    // Reproduced against the real controllers. Only the environment variable may raise it,
+    // because only a session launched with a higher cap actually has one.
+    config = {
+      ...config,
+      stop: { ...config.stop, blockCap: HARNESS_BLOCK_CAP },
+      rejectedOverrides: [
+        ...(config.rejectedOverrides ?? []),
+        `stop.blockCap (${config.stop.blockCap} exceeds the measured harness ceiling of ` +
+          `${HARNESS_BLOCK_CAP}; raising it needs CLAUDE_CODE_STOP_HOOK_BLOCK_CAP in the session, §S2)`,
+      ],
+    };
   }
   return config;
 }
 
 /**
- * The environment contract `/hyperpowers:setup` must establish.
+ * The environment contract a run must be launched under: **empty, and that is the design.**
  *
- * `plugin.json` cannot contribute `env` (ledger G4), so these must be written into the
- * project's `.claude/settings.json`. Hooks can read them back (ledger D6), which is how
- * preflight verifies the contract instead of trusting that setup ran.
- */
-export const REQUIRED_ENV = Object.freeze({
-  CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: {
-    value: '2',
-    why: 'Caps delegation at Fable → Opus → Sonnet and makes depth-3 spawning a harness error rather than a prompt request (spec §4.3).',
-  },
-  CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: {
-    value: String(DEFAULTS.stop.blockCap),
-    why: 'A whole feature runs inside one turn, so the consecutive-block cap must cover the run (spec §16.2).',
-  },
-
-  CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: {
-    value: '1',
-    why: 'Removes the built-in commit/PR guidance that contradicts the read-only Git policy (spec §17).',
-  },
-  CLAUDE_CODE_DISABLE_WORKFLOWS: {
-    value: '1',
-    why: 'Workflow orchestration would run outside the state machine and its accounting (spec §17).',
-  },
-});
-
-/**
- * Written by setup and reported by preflight, but never required.
+ * `plugin.json` cannot contribute `env` (ledger G4), so this could never be shipped as a plugin
+ * setting; §Q16 T16 measured these reaching the harness from a launch command instead, and then that
+ * route was retired too, because the director became a subagent whose pins hold on their own.
  *
- * Spec §17 asks for the advisor to be off so escalation goes up this plugin's ladder and lands in
- * its ledger. That is a purity property, not a safety one: no run mechanism reads the variable, and
- * nothing breaks mechanically when an advisor exists. Its cost, however, is borne *outside* runs —
- * the variable is project-scoped, so requiring it took the advisor away from every ordinary session
- * in that repository. Refusing to start a run over it was disproportionate, and it contradicted the
- * README, which tells the user they may remove it. Reported, not enforced.
+ * Five variables used to live here, written into the project's `.claude/settings.json` by a
+ * mandatory setup step. Each has been retired by a measurement rather than by preference:
+ *
+ * - `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2` — actively **harmful** now. §S3 T25: at depth 2 under
+ *   a cap of 2 the `Agent` tool is removed from the tool set, so a director subagent's own
+ *   coordinators could not dispatch. The harness default of 3 is exactly the tree this needs.
+ * - `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=200` — unnecessary. §S3 T27 and two real runs: a long agent
+ *   runs its whole workflow inside one dispatch and consumes no continuations. §S2 makes being
+ *   wrong survivable by suspending resumably instead of truncating.
+ * - `CLAUDE_CODE_DISABLE_WORKFLOWS=1` — redundant twice over. `Workflow` is already absent from
+ *   every subagent (§R1), and the `PreToolUse` hook denies it on the main thread (§E1).
+ * - `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` — already only recommended (§Q7), never read by any run
+ *   mechanism.
+ * - `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` — the honest remainder. §Q17 T23 measured that a
+ *   subagent *does* carry the built-in commit guidance, so the contradiction with the read-only
+ *   policy is real. It is left as a prompt-level contradiction against a hook-level prevention:
+ *   `git-policy.mjs` blocks the mutation whatever the system prompt suggests, and the director's
+ *   own instructions state the rule. Trading a certain install step for an uncertain prompt
+ *   nudge is the right way round.
+ *
+ * Nothing is written into the user's repository, and no run refuses to start for want of a
+ * setting. Keep it that way: an entry here is an install step, and an install step is a thing
+ * that can be missing.
  */
+export const REQUIRED_ENV = Object.freeze({});
+
 export const RECOMMENDED_ENV = Object.freeze({
   CLAUDE_CODE_DISABLE_ADVISOR_TOOL: {
     value: '1',
@@ -310,14 +442,13 @@ export const RECOMMENDED_ENV = Object.freeze({
   },
 });
 
-/** Settings keys `/hyperpowers:setup` writes alongside `env`. */
-export const REQUIRED_SETTINGS = Object.freeze({
-  disableWorkflows: {
-    value: true,
-    why: 'Documented, non-managed setting — the supported route to disable Workflows (ledger E1).',
-  },
-  includeGitInstructions: {
-    value: false,
-    why: 'Settings-level equivalent of CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS.',
-  },
-});
+/**
+ * There is no launch command any more.
+ *
+ * `launchCommand()` built a five-variable `env … claude --agent hyperpowers:hyperpowers-director
+ * --effort high "<request>"` line. It was correct and measured, and it was the wrong shape: it
+ * moved the requirement from a settings file into a command the user had to paste, which is the
+ * same friction wearing different clothes. `/hyperpowers:feature` dispatches the director as a
+ * subagent instead, whose `model:` and `effort:` pins hold on their own (§S3 T26), and none of the
+ * five variables survived the measurements that retired them — see `REQUIRED_ENV` above.
+ */

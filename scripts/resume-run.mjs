@@ -8,17 +8,16 @@
  * yielded.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { parseArgs, fail, emitJson, resolveProjectRoot } from './lib/cli.mjs';
+import { parseArgs, fail, emitJson, resolveProjectRoot, requireSafeId } from './lib/cli.mjs';
 import { bindSession, artifacts, activeRunId, listRuns } from './lib/paths.mjs';
 import { loadState, tryLoadState, mutateState } from './lib/state.mjs';
 import { PHASES, isTerminal } from './lib/phases.mjs';
 import { logEvent } from './lib/telemetry.mjs';
+import { stampFingerprint } from './lib/git-fingerprint.mjs';
 
 const { flags } = parseArgs();
 const projectRoot = resolveProjectRoot(flags);
-const sessionId = flags.session ?? process.env.CLAUDE_CODE_SESSION_ID;
+const sessionId = requireSafeId('session', flags.session ?? process.env.CLAUDE_CODE_SESSION_ID);
 if (!sessionId) fail('resume requires --session <id> (or CLAUDE_CODE_SESSION_ID in the environment).');
 
 /**
@@ -32,7 +31,8 @@ if (!sessionId) fail('resume requires --session <id> (or CLAUDE_CODE_SESSION_ID 
  * steal one that is bound elsewhere unless asked explicitly.
  */
 const runId = (() => {
-  if (typeof flags.run === 'string') return flags.run;
+  // An explicit `--run` with no usable value is refused, never reinterpreted as "pick one".
+  if (flags.run !== undefined) return requireSafeId('run', flags.run);
   const bound = activeRunId(projectRoot, sessionId);
   if (bound) return bound;
   const candidates = listRuns(projectRoot)
@@ -74,7 +74,23 @@ if (state.phase === 'SUSPENDED') {
   if (!target || !PHASES[target]) fail(`Cannot determine which phase run ${runId} was suspended from.`);
   mutateState(projectRoot, runId, (s) => {
     s.phase = target;
+    // Both counters, because neither resets on its own: `turn` on a new `prompt_id`,
+    // `directorTurn` on a new `agent_id`, and a resume changes neither. A run that suspended at its
+    // soft cap and came back still over it yielded again on the next hook firing — observed live,
+    // 90 seconds after a resume. `directorTurn` was missed on the day §S5 added it.
+    //
+    // It has to be here and not in `transition()`: `SUSPENDED.successors` is empty, so no legal
+    // transition leaves it — this script is the only route out, and a guard in `transition()` would
+    // be unreachable code guarding nothing.
     s.turn = { promptId: null, blocks: 0 };
+    // Blocks, not identity: the id is how the main thread learns which agent to resume, and
+    // clearing it left the Stop hook printing "(no director agent recorded yet)" — observed live,
+    // after which the main thread launched a duplicate director before catching itself.
+    // `yielded: true` because a resume *is* the hand-back: control sits with whoever ran this,
+    // not with a director. It is also the release valve for the one-director rule — while a
+    // director is driving, `git-policy.mjs` refuses to dispatch another, and resuming is the
+    // documented way to say "the old one is gone, a fresh dispatch is legitimate".
+    s.directorTurn = { agentId: s.directorTurn?.agentId ?? null, blocks: 0, yielded: true };
     s.stall = { signature: null, count: 0, lastAt: null };
     s.history.push({
       from: 'SUSPENDED', to: target, at: new Date().toISOString(), actor: 'system',
@@ -87,14 +103,32 @@ if (state.phase === 'SUSPENDED') {
 // A suspended run hands Git back to the user (`stopAllowed`), so the repository may legitimately
 // have moved while it was stopped — that is the point of suspending. The stale fingerprint would
 // read those commits as drift on the first Bash call after resuming and fail §13.11 for work the
-// policy explicitly permitted. Dropping it makes the next observation a fresh baseline.
-try { fs.rmSync(path.join(artifacts(projectRoot, runId).base, 'git-fingerprint.json'), { force: true }); } catch { /* nothing to clear */ }
+// policy explicitly permitted. This used to *delete* the file, which deferred the new baseline to
+// the first PostToolUse firing — and absorbed any mutation made by that same call, silently.
+// Worse, the deletion was unconditional: a resume of a run that never released Git (any
+// non-SUSPENDED phase) threw away a valid baseline for nothing, and the tag created before the
+// next Bash call escaped detection — reproduced. Stamping a fresh fingerprint *now*, and only on
+// the path where Git was actually released, keeps the rationale and closes both windows.
+if (state.phase === 'SUSPENDED') stampFingerprint(projectRoot, artifacts(projectRoot, runId).base);
 
 // The check above refuses to *steal* a run from a session that may still be driving it. This is
 // the other half: once ownership legitimately moves, the previous owner must stop being one.
 // `bindSession` enforces the exclusivity and reports whom it displaced.
 const { displaced } = bindSession(projectRoot, sessionId, runId);
-mutateState(projectRoot, runId, (s) => { s.sessionId = sessionId; });
+mutateState(projectRoot, runId, (s) => {
+  const adopted = s.sessionId && s.sessionId !== sessionId;
+  s.sessionId = sessionId;
+  // Adopting a run from another session must also release the one-director rule. The previous
+  // session's director — if one is even alive — can no longer be resumed from here, and its
+  // recorded `agentId` with `yielded: false` would make `git-policy` deny the fresh dispatch this
+  // resume exists to enable: the run is told to redispatch, obeys, and is refused — a wedge,
+  // reproduced. Reaching this line with a different owner means the ownership check above was
+  // satisfied (`--force`, or the phase was SUSPENDED), i.e. the user has already asserted the old
+  // session is gone. A same-session resume leaves the flag alone: its director may be mid-flight.
+  if (adopted && s.phase !== 'SUSPENDED') {
+    s.directorTurn = { agentId: s.directorTurn?.agentId ?? null, blocks: 0, yielded: true };
+  }
+});
 logEvent(projectRoot, runId, { type: 'resumed', sessionId, phase: target, displacedSessions: displaced });
 
 const a = artifacts(projectRoot, runId);

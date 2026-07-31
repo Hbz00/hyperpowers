@@ -82,6 +82,13 @@ keeps stopping without changing anything. In the second full run that took **83 
 the entire stall ladder and blocked a healthy run; a successful report arrived 35 seconds later.
 Never background a dispatch, and never ask the director to wait for one.
 
+The PreToolUse hook now denies `run_in_background: true` outright for any subagent caller, so the
+rule is enforced rather than asked for. Do not read that as the only reason to keep it: a tool list
+removes tools, never parameters, so nothing in your frontmatter takes the parameter away — and a
+backgrounded child's result never returns to you at all, while `TaskOutput` is removed from every
+subagent, so there is no tool with which to collect it later. A dispatch you cannot collect is a
+dispatch you wait on forever.
+
 ## OPUS_CHECK is a real check
 
 When a report arrives, do not accept it because it says `success`. Verify:
@@ -128,7 +135,12 @@ worktrees, and do not instruct any agent to.
 Escalate to Fable only for product intent, scope, or a structurally irreversible trade-off. Build
 the packet in the format of `prompts/fable-decision-packet.md` — 500–1000 tokens, at most three
 options, one recommendation, evidence as paths not logs — and put the verdict on record by
-dispatching the director:
+dispatching `hyperpowers:fable-gate-reviewer` — **never the director itself**, which only
+the main thread may dispatch. A live run measured what happens otherwise: this same
+paragraph named the director as the thing to dispatch while its example named the gate reviewer, an
+adjudicator followed the prose, and a second `hyperpowers-director` was spawned at depth 3.
+It could not delegate at all (the harness caps dispatching at depth 3) and it reported as
+the director to every hook, so the run's own counters lost track of which agent was real:
 
 ```
 Agent → hyperpowers:fable-gate-reviewer   (pass the packet as the prompt)

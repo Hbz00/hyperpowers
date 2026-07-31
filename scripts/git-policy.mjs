@@ -6,16 +6,24 @@
  * is the whole point of spec §14.4 — the guarantee must not depend on a model respecting a
  * prompt.
  *
- * The hook also enforces the two other deterministic rules the spec asks for: no writes into
- * `.git/`, and no use of the Claude Code Workflow tool (§17), which would spawn an
- * orchestration tree outside the Hyperpowers state machine and outside its accounting.
+ * The hook also enforces the other deterministic rules the spec asks for: no writes into `.git/`,
+ * no use of the Claude Code Workflow tool (§17), which would spawn an orchestration tree outside
+ * the Hyperpowers state machine and outside its accounting, and no second director (§S13).
+ *
+ * **The fail directions differ, deliberately.** Git classification fails closed because that is the
+ * guarantee. The dispatch rule below fails *open*, because a transient unreadable `state.json`
+ * denying an `Agent` call would brick `/hyperpowers:feature` itself — and the cost of missing an
+ * impostor is one wasted agent that the `SubagentStop` depth guard then ignores, while the cost of a
+ * false deny is a plugin that cannot start.
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import { runHook, emitPreToolUse, projectRootFrom } from './lib/hookio.mjs';
 import { classifyCommand, touchesGitInternals } from './lib/git-policy.mjs';
-import { activeRunId } from './lib/paths.mjs';
-import { tryLoadState } from './lib/state.mjs';
+import { activeRunId, artifacts } from './lib/paths.mjs';
+import { tryLoadState, directorIsDriving } from './lib/state.mjs';
+import { DIRECTOR_AGENT, bareAgentName } from './lib/config.mjs';
 import { stopAllowed } from './lib/phases.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { logEvent } from './lib/telemetry.mjs';
@@ -62,8 +70,23 @@ function policyApplies(input, projectRoot) {
   const runId = input.session_id ? activeRunId(projectRoot, input.session_id) : null;
   if (!runId) return { active: false, runId: null };
   const state = tryLoadState(projectRoot, runId);
+
+  // Corrupt is not the same as absent, and only one of them means "nothing to govern".
+  //
+  // Any unreadable state released the policy — a truncated write, an unsupported `schemaVersion` — so
+  // `git commit`, a `.git/` write and the Workflow tool all became available in the one hook whose
+  // contract is that anything it cannot classify is denied. A bound run whose phase is unknown is
+  // exactly the unclassifiable case, and the fail-closed answer to it is to keep governing.
+  //
+  // Absent state is the other half and is not symmetric: `claude plugin uninstall` deletes the whole
+  // data directory (§S25) while the session binding survives, and denying Git for ever on the strength
+  // of a run that no longer exists would hold the user's repository hostage to a reinstall.
+  if (!state) {
+    const present = fs.existsSync(artifacts(projectRoot, runId).state);
+    return { active: present, runId };
+  }
   // A finished, aborted or suspended run no longer owns the session's Git.
-  if (!state || stopAllowed(state.phase)) return { active: false, runId };
+  if (stopAllowed(state.phase)) return { active: false, runId };
   return { active: true, runId };
 }
 
@@ -119,6 +142,73 @@ await runHook(
     // Outside a live run this plugin has no business governing the user's tools.
     const { active, runId } = policyApplies(input, projectRoot);
     if (!active) return;
+
+    // --- one run, one director (§S13) ---------------------------------------------
+    // Prevention to pair with the `SubagentStop` depth guard's detection, which is how this
+    // codebase treats every rule it cannot express in one place (ADR 0003). The legitimate first
+    // dispatch is never seen here: `/hyperpowers:feature` dispatches the director, and the director
+    // creates the run — so there is no bound run to be active, and this hook has already returned.
+    //
+    // Wrapped and neutral on any error: see the fail-direction note in the file header.
+    if (tool === 'Agent') {
+      // --- no subagent may background a dispatch --------------------------------
+      // The rule was prose in two agent files and absent from three, and the prose claimed an
+      // enforcement that did not exist ("run_in_background is not available to you"): it is a
+      // *parameter* of the Agent tool, which a `tools:` list cannot remove — run 9b's director
+      // passed it and entered a six-hour wedge, because a backgrounded child's result never
+      // returns to its dispatcher and no subagent has `TaskOutput` to collect it. Measured (§V3):
+      // this payload carries `agent_id` exactly when the caller is a subagent, so the main
+      // thread's own background dispatch of the director — the one legitimate case — is never
+      // seen by this predicate. Fail-open on anything else, per the header: `agent_id` absent, or
+      // any error, allows.
+      try {
+        if (input.agent_id && toolInput?.run_in_background === true) {
+          const reason =
+            `Hyperpowers: a subagent must not dispatch with \`run_in_background: true\`. The `
+            + `result of a backgrounded child never returns to you, and you have no TaskOutput to `
+            + `collect it — a child you cannot collect is a child you wait on forever (run 9b `
+            + `spent six hours exactly there). To run work concurrently, issue several Agent `
+            + `calls in one message; they run in parallel and each returns to you.`;
+          record(input, projectRoot, runId, { tool, subagent_type: toolInput.subagent_type, background: true });
+          emitPreToolUse('deny', reason);
+          return;
+        }
+      } catch { /* fail open: never let this rule stop a dispatch it cannot classify */ }
+      try {
+        // `transcript_path` is on the PreToolUse payload (§D5), and it is what lets this rule work
+        // during phase one: state does not learn the director's id until its first stop (§S40).
+        //
+        // The `replaceable` reservation is deliberately NOT consumed here. PreToolUse fires
+        // before permission handling and before the tool runs, so consuming at this point spent
+        // the one authorisation on dispatches that never started — a permission refusal or a
+        // failed launch left `replaceable: false` with a dead director recorded, every retry
+        // denied, and the Stop hook's `yielded !== true` branch allowing silently: a wedge with
+        // no recovery instruction, reproduced. The reservation is committed only when the
+        // replacement demonstrably exists — the director `SubagentStart`/`SubagentStop` id write
+        // in `subagent-controller.mjs` clears the marker — so a failed dispatch leaves it open
+        // and a retry just works. The price is that between a `SendMessage` revival (which no
+        // hook can see) and that director's next stop, a duplicate dispatch would be allowed;
+        // that needs the main thread to disobey its instruction, and the depth guard plus the id
+        // flip detection bound the damage. A wedge on an ordinary failure is worse than a
+        // misuse window on a double disobedience — run 9b is what a wedge costs.
+        const st = tryLoadState(projectRoot, runId);
+        if (bareAgentName(toolInput.subagent_type) === DIRECTOR_AGENT
+            && directorIsDriving(st, input.transcript_path)) {
+          const reason =
+            `Hyperpowers: run ${runId} already has a director and it is driving. A second one holds `
+            + `none of the run's context, and at depth 3 it cannot dispatch anything at all — a live `
+            + `run grew both, and they took turns writing to the same state.\n\n`
+            + `If you are the main thread and the director owes you a turn, resume it by id with `
+            + `\`SendMessage\`. If you are a coordinator, you were never meant to dispatch the `
+            + `director: write your decision packet and return it — the director is waiting for it. `
+            + `A genuinely dead director is released by \`/hyperpowers:resume\`.`;
+          record(input, projectRoot, runId, { tool, subagent_type: toolInput.subagent_type });
+          emitPreToolUse('deny', reason);
+          return;
+        }
+      } catch { /* fail open: never let this rule stop a dispatch it cannot classify */ }
+      return;
+    }
 
     if (FORBIDDEN_TOOLS.has(tool)) {
       const reason = tool.endsWith('Worktree')

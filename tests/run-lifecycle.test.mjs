@@ -267,7 +267,20 @@ describe('a run reaches COMPLETE through documented commands only', () => {
     // Condition 14 has to be reachable too, and only `artifact` can satisfy it.
     const withoutDiagram = JSON.parse(gate('completion', { expectFail: true }).stdout);
     assert.ok(withoutDiagram.conditions.some((c) => c.id === '13.14-product-diagram' && c.status === 'fail'));
-    sm(['artifact', '--name', 'diagramUrl', '--value', 'https://claude.ai/public/artifacts/example']);
+    // Condition 14 through the documented relay, not the raw verb. The director hands the page to
+    // the main thread (§S21) because a subagent's own `Artifact` call opens on nobody's screen —
+    // so a lifecycle that still recorded the URL directly would be proving a path no run takes.
+    const page = path.join(RUNDIR, 'diagram.html');
+    fs.writeFileSync(page, '<h1>product flow</h1>');
+    sm(['publish-request', '--file', page, '--title', 'Product flow']);
+    sm(['published', '--url', 'https://claude.ai/public/artifacts/example']);
+
+    // This walk has no session transcript, so the director tier is unobservable — and 13.12b now
+    // owes a written decision instead of passing silently. The discharge is itself a documented
+    // verb, which is exactly what this file's rule demands: a real run whose transcripts cannot
+    // be read must do the same.
+    sm(['risk', '--add', 'director tier unobservable: no session transcript exists in this environment',
+      '--source', '13.12b-director-model']);
 
     const final = JSON.parse(gate('completion').stdout);
     assert.equal(final.complete, true, JSON.stringify(final.conditions.filter((c) => c.status === 'fail'), null, 2));

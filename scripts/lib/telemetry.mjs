@@ -69,6 +69,16 @@ export function summarise(projectRoot, runId) {
 
   /** Work packages folded by id, so lifecycle chatter cannot inflate the counts. */
   const packages = new Map();
+  /**
+   * Adjudications folded by round and finding, last decision winning — the same argument one level
+   * across.
+   *
+   * A coordinator may revisit a decision, and run 8 did: 17 journal entries for 14 findings. Counting
+   * entries reported a finding accepted *and* rejected when it had been reconsidered once, and
+   * counted the accepted one twice when it had not. The question §6.2 asks is how many findings were
+   * accepted, so the unit has to be the finding.
+   */
+  const adjudicated = new Map();
 
   for (const e of events) {
     switch (e.type) {
@@ -117,12 +127,12 @@ export function summarise(projectRoot, runId) {
         summary.codexRounds += 1;
         summary.codexFindings += e.findings ?? 0;
         break;
+      // `adjudication` is the first decision on a finding; `adjudication_decision_replaced` is a
+      // later one on the same finding (§S28). Both are decisions and both belong here — folded, so
+      // the count is of findings and the verdict is the one that stands.
       case 'adjudication':
-        if (e.decision === 'accepted') summary.codexFindingsAccepted += 1;
-        if (e.decision === 'rejected') summary.codexFindingsRejected += 1;
-        // Spec §6.2 asks for the Opus→Fable escalation rate. The datum was already logged on
-        // every adjudication and simply never aggregated.
-        if (e.escalated || e.decision === 'escalated_to_fable') summary.escalations.opusToFable += 1;
+      case 'adjudication_decision_replaced':
+        adjudicated.set(`${e.round}:${e.finding}`, e);
         break;
       case 'stall_escalation':
         if (e.to === 'opus') summary.escalations.sonnetToOpus += 1;
@@ -154,6 +164,15 @@ export function summarise(projectRoot, runId) {
       summary.firstPassAcceptance.total += 1;
       if (pkg.outcome === 'accepted' && pkg.attempts === 1) summary.firstPassAcceptance.accepted += 1;
     }
+  }
+
+  // One count per finding, and the decision that stands.
+  for (const d of adjudicated.values()) {
+    if (d.decision === 'accepted') summary.codexFindingsAccepted += 1;
+    if (d.decision === 'rejected') summary.codexFindingsRejected += 1;
+    // Spec §6.2 asks for the Opus→Fable escalation rate. The datum was already logged on every
+    // adjudication and simply never aggregated.
+    if (d.escalated || d.decision === 'escalated_to_fable') summary.escalations.opusToFable += 1;
   }
 
   // Token and cost figures come from the session transcript, which records the model and real

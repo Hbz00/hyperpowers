@@ -5,7 +5,7 @@ benchmark numbers cannot be verified from here, and the spec says as much. The *
 however, can be recomputed from the harness's own model registry, which is what this document
 does.
 
-## Prices (verified)
+## Prices (verified — list prices as of 2026-07-30)
 
 From the Claude Code binary's model registry (validation ledger A4), USD per million tokens:
 
@@ -15,14 +15,31 @@ From the Claude Code binary's model registry (validation ledger A4), USD per mil
 | Opus 5 | `tier_5_25` | 5 | 25 |
 | Sonnet 5 | `tier_3_15` | 3 | 15 |
 
-Cross-checked against the published API pricing reference: identical on all three rows, as are
-the cache multipliers this model applies (reads ×0.1, writes ×1.25). Two independent sources
-agreeing is worth stating, because every conclusion below is a ratio of these six numbers — if
-they were wrong, nothing else here would survive.
+Cross-checked against the published API pricing reference: identical on all three rows. Two
+independent sources agreeing is worth stating, because every conclusion below is a ratio of these
+six numbers — if they were wrong, nothing else here would survive. The table carries a date because
+it is a snapshot: A4 validated these tiers and nothing else, and prices move.
 
-A model family this table does not recognise is priced at the **Fable** rate, not zero. Pricing
-an unknown model at zero makes its spend invisible to the `maxCostUsd` breaker, and a budget that
-silently stops counting is worse than one that overestimates.
+**One divergence from list, deliberate and recorded in ledger §V10.** Cache *writes* are 1.25×
+for a five-minute TTL and **2× for a one-hour one**, and `transcript.mjs` now bills both: the full
+write total at 1.25× plus a **+0.75× premium on the one-hour share** — a premium added to the
+existing term, never a `5m×1.25 + 1h×2` replacement, because §V10 records rows where the two TTL
+fields under-sum the total they split, and a replacement would silently drop the difference. (The
+uniform-1.25× under-report this paragraph used to describe was fixed with that change; it was
+worth +0.17% and +0.36% on the two most recent runs.) And Sonnet 5 carries an introductory $2/$10 through
+2026-08-31 which is **not applied**: applying it would move every figure here down ~5.5%, which is
+the one direction a cost figure must never fail in, and would make an archived run reprice itself the
+day the promotion ends. Cache *reads* are 0.1× with no TTL split, so that half is right as written.
+
+**What "measured" means in every dollar figure below.** These are subscription-billed sessions, not
+API traffic. **Token counts are measured** — per model, per request, including subagents, from the
+session transcripts. **Dollars are derived**: the counts multiplied by the list-price table above.
+They are an API-price equivalent, not an invoice.
+
+A model family this table does not recognise is priced at the **Fable** rate, not zero. Pricing an
+unknown model at zero would make its spend invisible in every figure below, and in the notice that
+tells a running feature what it has cost so far — under-reporting is the one direction a cost
+figure must never fail in.
 
 So per token, **Fable = 2 × Opus** and **Sonnet = 0.6 × Opus**. All three declare
 `default_effort: "high"`.
@@ -139,10 +156,13 @@ timeout is sized for the Sol case; a shorter one would manufacture failures.
 - **Orchestration overhead.** As above: context duplication across subagents, delegation
   artefacts, and the remediation cycles the review rounds generate. This is the largest
   unmodelled term and it works against the pyramid.
-- **Prompt caching.** Cache reads bill at 0.1× and cache writes at 1.25×. Long-lived director
-  context benefits disproportionately, so real Fable cost is likely below this model's estimate.
-  `scripts/lib/transcript.mjs` applies the real multipliers when measuring. This works in the
-  pyramid's favour and partly offsets the previous point.
+- **Prompt caching.** Cache reads bill at 0.1×; cache writes at 1.25× for a five-minute TTL and 2×
+  for a one-hour one — and `scripts/lib/transcript.mjs` applies all three (the one-hour share as a
+  +0.75× premium on top of the base write term, §V10). Long-lived director context benefits
+  disproportionately *while the cache holds* — but a subagent's expires at ~5 minutes (ledger
+  §T2), so a long run pays to re-establish it repeatedly, and on the two most recent runs the
+  write term is larger than the read term (§V6). So this is not the unambiguous saving it was
+  written as.
 - **Input-token distribution.** The shares above are output-token shares. Input prices carry the
   same 2 : 1 : 0.6 ratio, so the arithmetic is unchanged *if* input distributes like output —
   but Sonnet reads far more than it writes, so its real share of input is higher, which pushes
@@ -161,7 +181,9 @@ is observable after the fact even though it is not predicted here.
 Every run reads its own transcript and reports actual per-model token usage — including
 subagents, whose transcripts live in `<session>/subagents/` rather than in the session file
 (ledger O3) — with cache multipliers applied. `/hyperpowers:status` and the final report show the
-real distribution against the reference bands.
+real distribution against the reference bands. The **token counts** are what is measured there; the
+dollars beside them are those counts priced at the list table above, which is an equivalent rather
+than a bill (§V10).
 
 The bands are orientation, never a gate. A run that sits outside every band and delivers a
 correct feature is a good run.
@@ -208,21 +230,39 @@ how many turns the agents happen to take. That variance is the finding, not the 
 | fresh input | 0.0% | 0.0% |
 
 **Two thirds of the bill is context, not text.** §6.2 measures output-token share, every routing
-rule optimises output-token share, and output tokens are a third of the cost.
+rule optimises output-token share, and output tokens are a third of the cost. That holds on every
+run measured since — 65% to 82% context — but "context" is **two** terms with two different
+remedies, and this table's own rows are the split: cache *read* is re-reading what an agent carries,
+cache *write* is re-establishing a cache that expired. On the two most recent runs the write term is
+the larger of the two (46.9% and 42.3% against 26.5% and 34.1%; ledger §V6), which points at how
+many idle windows a run crosses rather than at how much it carries.
 
 Cost per turn, measured: **director $0.130 · Opus $0.071 · Sonnet $0.031.** A turn is one API
 round-trip, and a round-trip re-reads the whole context. So the unit of spend is *the turn*, and
 the price of a turn is set by whose context it re-reads.
 
-Then the number that decides where to spend engineering effort — across 1,415 assistant messages
-in two complete runs:
+Then the number that was supposed to decide where to spend engineering effort — across 1,415
+assistant messages in two complete runs:
 
 > **Tool calls per turn: 1.00. Every agent, every phase, zero exceptions.**
 
-Every tool call is its own API round-trip. The harness supports issuing independent calls together
-in one message; no agent ever did. Batching independent calls even two at a time removes on the
-order of 80 Opus turns and 25 director turns from run #1 — **roughly a quarter of the bill, with
-no task removed and no decision moved to a weaker model.**
+**That figure was an artefact, and it is withdrawn (ledger §V4).** It divided `tool_use` blocks by
+the transcript rows carrying one, and the transcript never writes two such blocks into a single row
+— so 1.00 was an identity that any transcript would produce, and "zero exceptions" was the tell. The
+1,415 is the giveaway too: it is 655 + 760, the two runs' assistant *row* counts. This is the same
+row-versus-request confusion as the §P7 correction above, surviving in a second metric.
+
+Recomputed per API request, which is the unit the paragraph above defines:
+
+| run #1 | run #2 | run #3 | production run | run 8 | run 9 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.153 | 1.183 | 1.208 | 1.242 | 1.259 | 1.243 |
+
+Run #1 issued two or more calls on 47 of its 321 requests; run #2 has one request carrying eight.
+Agents were batching on the very transcripts this document called unbatched. Batching independent
+calls is still right, still cheap and still instructed in every agent — but "roughly a quarter of
+the bill" was measured against a baseline that never existed, and no claim about the size of the
+remaining headroom is supported by anything here.
 
 ### What this says about the pyramid
 
@@ -243,6 +283,18 @@ routing prompts produced, so a prompt change validated on one run has proved not
 the lever that survives the noise, because it is measurable per agent and per dispatch rather than
 as a share of a varying whole.
 
-**The economic conclusion, restated.** The pyramid is not where the money is. The money is in how
-many times each agent re-reads its context, and the cheapest large saving available is to stop
-paying for the same context twice.
+**And the band measures the wrong quarter.** Decomposed by *function* rather than by tier across
+three complete runs (ledger §V7), production work — implementers, test engineers, the verifier — is
+**15–19% of spend**. Adjudication is 17.7 / 28.9 / 36.7%, direction 27.5 / 40.2 / 30.2%. Output
+tokens themselves are 23.6–26.6% of cost. So a band expressed as *shares of output tokens*, aimed at
+pushing production onto Sonnet, regulates about a quarter of the bill and presumes that quarter is
+where the bill is. Nothing in those runs is misrouted: every Opus dispatch is a role the spec's own
+table assigns to Opus. The inversion is the arithmetic consequence of a six-round review
+architecture whose judgment volume outgrows its production volume — the band is the wrong instrument
+for it, which is why nothing gates on it.
+
+**The economic conclusion, restated.** The pyramid is not where the money is. The money is in
+context — carried across turns and re-established after it expires — and it concentrates in whichever
+**role** accumulates the most turns across all its dispatches. On the production run that was the
+execution coordinator; on run 9 it was the review adjudicator at 36.7%, above the director (§V5).
+Look for the role with the turns, not for the agent with the longest life.

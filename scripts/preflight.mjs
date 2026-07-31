@@ -17,14 +17,20 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { parseArgs, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { dataRoot, isDataRootFromHarness, describeDataRoot, dataRootAgreesWithHooks, dataRootIsAmbiguous, artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
-import { REQUIRED_ENV, RECOMMENDED_ENV, loadConfig } from './lib/config.mjs';
+import { REQUIRED_ENV, RECOMMENDED_ENV, loadConfig, DIRECTOR_AGENT } from './lib/config.mjs';
 import { directorTier } from './lib/transcript.mjs';
 import { tryLoadState, mutateState } from './lib/state.mjs';
 import { logEvent } from './lib/telemetry.mjs';
 
 /** Superpowers contracts Hyperpowers has actually been validated against. */
 const SUPERPOWERS_COMPAT = { min: '6.0.0', below: '7.0.0', validatedAgainst: '6.2.0' };
-const MIN_CLAUDE_CODE = '2.1.0';
+// The generation every ledger measurement was made on. 2.1.0 was advertised for a while, and it
+// was a claim nobody had tested: the nested-agent behaviour this architecture depends on
+// (director → coordinator → worker, depth 3 by default) and plugin `settings.json` support were
+// both validated only on 2.1.219/2.1.220 — older versions in the advertised range demonstrably
+// could not run the delegation tree, so preflight said "ready" about an environment the first
+// EXECUTION dispatch would break in.
+const MIN_CLAUDE_CODE = '2.1.220';
 const MIN_NODE = 18;
 
 const { flags } = parseArgs();
@@ -50,34 +56,57 @@ const add = (id, status, detail, remedy = null) => checks.push({ id, status, det
     ok === false ? `Update Claude Code to ${MIN_CLAUDE_CODE} or later.` : null);
 }
 
-// ------------------------------------------------------ environment contract ----
-// `plugin.json` cannot contribute `env` (ledger G4), so this must come from the project's
-// .claude/settings.json. Whether that needs a session restart is measured here rather than
-// assumed: this process was spawned after setup wrote the file, so unlike setup it can tell.
+// ----------------------------------------------------------- delegation depth ----
+// The architecture is a three-level tree — director (1) → coordinator (2) → worker (3) — and the
+// harness default depth of 3 is exactly what it needs (§S3 T25). But an *inherited* cap breaks it
+// invisibly: earlier Hyperpowers setup instructions wrote CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2
+// into project settings, and at depth 2 under a cap of 2 the Agent tool is removed outright, so
+// the first coordinator dispatch of EXECUTION dies in an environment preflight had called ready.
+// The variable's absence is the good case; a value below 3 is a hard failure with the remedy named.
 {
-  const missing = [];
-  for (const [name, spec] of Object.entries(REQUIRED_ENV)) {
-    const actual = process.env[name];
-    if (name === 'CLAUDE_CODE_STOP_HOOK_BLOCK_CAP') {
-      // Any sufficiently large cap is acceptable; the exact number is a preference.
-      if (!actual || Number(actual) < 32) missing.push(`${name} (want >= 32, got ${actual ?? 'unset'})`);
-      continue;
-    }
-    if (actual !== spec.value) missing.push(`${name} (want ${spec.value}, got ${actual ?? 'unset'})`);
+  const raw = process.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH;
+  const depth = Number(raw);
+  if (raw !== undefined && (!Number.isFinite(depth) || depth < 3)) {
+    add('subagent-depth', 'fail',
+      `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=${raw} is in this environment, and the delegation tree ` +
+        `needs depth 3 (director → coordinator → worker). At a lower cap the Agent tool is removed ` +
+        `from the level that hits it (§S3 T25), so the run would die at its first coordinator ` +
+        `dispatch — after preflight had said ready.`,
+      'Unset the variable (the harness default of 3 is what this needs) or set it to 3 or more. ' +
+        'Older Hyperpowers setup used to write =2 into project-level Claude settings; that is the ' +
+        'first place to look for where this value is coming from.');
+  } else {
+    add('subagent-depth', 'pass',
+      raw === undefined
+        ? 'no spawn-depth cap in the environment; the harness default of 3 fits the delegation tree'
+        : `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=${raw} accommodates the three-level tree`);
   }
-  // Recommended, not required: reported so the user knows, never a reason to refuse a run.
+}
+
+// ------------------------------------------------------------- configuration ----
+// A refused override was recorded and shown to nobody: `config.rejectedOverrides` had exactly one
+// reader, and it was a test. A user whose `.hyperpowers.json` mistyped a bound — or set one to a
+// value that would have disabled a safety mechanism — believed it was in force. Warn, never fail:
+// every rejection falls back to a working default.
+if (config.rejectedOverrides?.length) {
+  add('config-overrides', 'warn',
+    `${config.rejectedOverrides.length} override(s) in .hyperpowers.json were refused and replaced ` +
+      `by their defaults: ${config.rejectedOverrides.join('; ')}`,
+    'Fix or remove the entries; the values in force are the defaults, not what the file says.');
+}
+
+// ------------------------------------------------------ environment contract ----
+// There is none. `REQUIRED_ENV` is empty by design — see `lib/config.mjs` for what each retired
+// variable was replaced by. The advisory below is all that remains, and it never blocks.
+{
   const advisory = Object.entries(RECOMMENDED_ENV)
     .filter(([name, spec]) => process.env[name] !== spec.value)
     .map(([name, spec]) => `${name} (${spec.why})`);
   if (advisory.length) {
     add('environment-recommended', 'warn',
       `Not set: ${advisory.join('; ')}`,
-      'Optional. Escalation still works; a second advisor simply arbitrates outside this run\'s ledger.');
+      'Optional, and nothing installs it. Escalation still works; a second advisor simply arbitrates outside this run\'s ledger.');
   }
-
-  add('environment-contract', missing.length === 0 ? 'pass' : 'fail',
-    missing.length === 0 ? 'All required environment variables are in force.' : `Unset or wrong: ${missing.join('; ')}`,
-    missing.length ? 'Run /hyperpowers:setup. If these are still missing when you re-run preflight, restart the Claude Code session — environment variables may only be read at startup.' : null);
 }
 {
   const where = describeDataRoot();
@@ -239,26 +268,47 @@ const add = (id, status, detail, remedy = null) => checks.push({ id, status, det
   // director has already produced messages, so the tier that is *actually* directing can be read
   // from the transcript. That turns the most consequential of these checks from a disclaimer into
   // a measurement, at the one moment acting on it is still cheap.
-  const tier = runId ? directorTier(tryLoadState(projectRoot, runId) ?? {}) : { ok: null };
+  const tier = directorTier(runId ? tryLoadState(projectRoot, runId) ?? {} : {});
   if (tier.ok === true) {
     add('claude-models', 'pass',
-      `The director is running on \`${tier.observed}\`, which is the configured ${tier.expected} tier. ` +
-        `Availability of the coordinator and worker tiers is still unverifiable before use; a demotion ` +
-        `there surfaces as \`model_mismatch\` and fails completion condition 12b.`);
+      `The director is running on \`${tier.observed}\`, which is the configured ${tier.expected} tier` +
+        `${tier.effort ? ` at effort \`${tier.effort}\`` : ''}. Availability of the coordinator and ` +
+        `worker tiers is still unverifiable before use; a demotion there surfaces as ` +
+        `\`model_mismatch\` and fails completion condition 12b.`);
   } else if (tier.ok === false) {
     add('claude-models', 'fail',
-      `The director is running on \`${tier.observed}\` (${tier.family}), not the configured ` +
+      `The director subagent is running on \`${tier.observed}\` (${tier.family}), not the configured ` +
         `${tier.expected} tier. Product authority would be exercised by the wrong model for the whole run.`,
-      `A skill's \`model:\` pin does not override a session model chosen interactively — measured. ` +
-        `Open the session on the director tier (\`claude --model ${tier.expected}\`) and invoke ` +
-        `/hyperpowers:feature there, or declare the change deliberately with ` +
+      `A subagent's \`model:\` pin holds against the session default but is outranked by a ` +
+        `per-invocation \`model\` argument and by \`CLAUDE_CODE_SUBAGENT_MODEL\` (§V2). Check ` +
+        `\`model:\` in \`agents/${DIRECTOR_AGENT}.md\`, check that variable in this session's ` +
+        `environment, or declare the change deliberately with ` +
         `{"models":{"director":"${tier.family}"}} in .hyperpowers.json.`);
   } else {
     add('claude-models', 'unverifiable',
-      `Availability of ${configured.join(', ')} cannot be checked before use, and no director message ` +
-        `has been written yet to read the tier from. The first transition out of PREFLIGHT refuses a ` +
-        `mismatch, and the Stop controller raises \`model_mismatch\` thereafter.`,
-      'Run this again with --run <id> once the run exists, or rely on the transition check.');
+      `Availability of ${configured.join(', ')} cannot be checked before use, and the director ` +
+        `subagent has not been dispatched yet, so there is no transcript to read the tier from. The ` +
+        `first transition out of PREFLIGHT refuses a mismatch.`,
+      'Run this again with --run <id> once the director is running, or rely on the transition check.');
+  }
+
+  // Effort and depth: reported, never a failure. A wrong *model* inverts the pyramid and fails
+  // above; a wrong effort on the right model is a degradation, and a run that is otherwise correct
+  // must not be refused for it. Depth is free to check and catches the director being dispatched
+  // from the wrong level — at depth 2 its own coordinators would lose the `Agent` tool (§S3 T25).
+  if (tier.observed) {
+    const problems = [];
+    if (tier.effortOk === false) problems.push(`effort \`${tier.effort}\` where the run is configured for \`${tier.expectedEffort}\``);
+    if (tier.spawnDepth !== null && tier.spawnDepth !== 1) problems.push(`spawn depth ${tier.spawnDepth}, expected 1`);
+    add('director-agent', problems.length ? 'warn' : 'pass',
+      problems.length
+        ? `Director \`${tier.agent}\` is running, with: ${problems.join('; ')}.`
+        : `Director \`${tier.agent}\` is running at depth ${tier.spawnDepth ?? '?'}` +
+          `${tier.effort ? ` on effort \`${tier.effort}\`` : ''}, pinned by its own definition.`,
+      problems.length
+        ? `Both are declared in \`agents/${DIRECTOR_AGENT}.md\`; a subagent honours them, so a ` +
+          `divergence means the file and \`.hyperpowers.json\` disagree.`
+        : null);
   }
 }
 

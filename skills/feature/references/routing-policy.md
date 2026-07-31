@@ -117,11 +117,15 @@ reaches the final report — but may never declare `COMPLETE` with an accepted c
 open.
 
 Per run, in `.hyperpowers.json`. They exist to stop a *failing* loop, not to interrupt a healthy
-feature — a run that hits one transitions to `BUDGET_EXCEEDED` and says which bound it was.
+feature — and **none of them ends a run**. Cost, duration and the counter bounds used to move a run
+to `BUDGET_EXCEEDED`, which was terminal and unresumable: crossing a number three quarters of the
+way through made a finished-but-for-the-last-step feature unfinishable. Spend is now reported at
+every transition once it passes `costNoticeUsd`, and stopping is the user's call —
+`/hyperpowers:abort`.
 
 | Bound | Enforced by |
 | --- | --- |
-| `maxDurationMs`, `maxCostUsd`, `maxWorkPackages`, `maxSubagents`, `maxFallbacks` | the Stop hook, mechanically |
+| `costNoticeUsd` | nothing — reported at every transition, never enforced |
 | `maxExtraReviewsPerArtifact` | the Codex adapter, mechanically — it refuses the round |
 | `maxAttemptsPerTask`, `maxParallelWriters`, `maxParallelReaders` | you, the coordinator — no hook sits between you and your own retry or your own scheduling |
 

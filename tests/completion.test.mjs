@@ -224,6 +224,28 @@ describe('completion gate is reachable', () => {
 
     write('reviews/implementation-1.json', JSON.stringify(cleanReview('implementation-1', 'gpt-5.6-luna', 'xhigh')));
     write('reviews/implementation-2.json', JSON.stringify(cleanReview('implementation-2', 'gpt-5.6-sol', 'high')));
+
+    // `packages-accepted` now re-verifies the evidence behind each acceptance: the newest
+    // referenced report must exist and say success (or carry a recorded override). The fixture
+    // therefore sits where a real accepted run sits — statuses AND the reports that justified them.
+    const acceptedTask = (id, criteria) => ({
+      id, objective: `Implement ${id} exactly as the plan states.`,
+      scope: { files: ['src/a.py'], owned_files: ['src/a.py'] }, interfaces: 'x', constraints: 'y',
+      verification: { method: 'pytest', commands: ['pytest -q'] },
+      acceptance_criteria: criteria, out_of_scope: [], report_format: 'agent-report.schema.json',
+      status: 'accepted', depends_on: [], parallel_safe: true, reports: [`${id}-attempt1`],
+    });
+    write('tasks.json', JSON.stringify({
+      tasks: [acceptedTask('WP-001', ['AC-1']), acceptedTask('WP-002', ['AC-2'])],
+    }));
+    for (const wp of ['WP-001', 'WP-002']) {
+      write(`reports/${wp}-attempt1.json`, JSON.stringify({
+        work_package_id: wp, agent: 'sonnet-implementer', status: 'success', attempt: 1,
+        storedAt: new Date().toISOString(), commands_run: ['pytest -q'],
+        results: [{ check: 'suite', expected: 'pass', observed: 'pass', passed: true }],
+        evidence: ['tests pass'], unverified: [], risks: [],
+      }));
+    }
     write('evidence.json', JSON.stringify({
       generatedAt: new Date().toISOString(),
       criteria: [
@@ -239,6 +261,12 @@ describe('completion gate is reachable', () => {
       failing_before_fix: ['tests/test_rl.py::test_429 — assert 200 == 429'],
       residue: { todos: [], placeholders: [], mocks: [], out_of_scope_files: [] },
     }));
+
+    // This synthetic run has no session transcript, so the director tier is unobservable — and an
+    // unobserved tier now owes a stated decision (13.12b registers in `mustBeStated`). The fixture
+    // does what a real degraded run must do: writes the decision down.
+    sm(['risk', '--add', 'director tier unobservable in this synthetic fixture: no session transcript exists',
+      '--source', '13.12b-director-model']);
   });
 
   test('fails only on the missing product diagram', () => {
@@ -248,11 +276,21 @@ describe('completion gate is reachable', () => {
       `unexpected failures: ${JSON.stringify(out.conditions.filter((c) => c.status === 'fail'), null, 2)}`);
   });
 
-  test('the diagram URL can actually be recorded', () => {
-    // The defect this test exists for: `state.artifacts` was read by the gate but never written
-    // by anything, making COMPLETE unreachable in every run.
-    const out = JSON.parse(sm(['artifact', '--run', RUN, '--name', 'diagramUrl', '--value', 'https://claude.ai/artifact/abc']).stdout);
-    assert.equal(out.value, 'https://claude.ai/artifact/abc');
+  test('the diagram URL can actually be recorded, by the route a run really takes', () => {
+    // Two defects, one test. `state.artifacts` was read by the gate and written by nothing, making
+    // COMPLETE unreachable in every run. Then the verb that wrote it — `artifact --name diagramUrl`
+    // — required the director to have published the page itself, which returns a URL that opens on
+    // nobody's screen (§S21). So the reachable route is the *only* route: park, publish, record.
+    const page = path.join(RUNDIR, 'diagram.html');
+    fs.writeFileSync(page, '<h1>flow</h1>');
+    const parked = JSON.parse(sm(['publish-request', '--run', RUN, '--file', page,
+      '--title', 'How it works', '--source', 'flowchart TD\n  a --> b']).stdout);
+    assert.equal(parked.parked, 'publish');
+    assert.ok(fs.existsSync(path.join(RUNDIR, 'diagram.mmd')),
+      'the source travels with the request, so the report can render it inline');
+
+    const out = JSON.parse(sm(['published', '--run', RUN, '--url', 'https://claude.ai/artifact/abc']).stdout);
+    assert.equal(out.published, 'https://claude.ai/artifact/abc');
     const state = JSON.parse(fs.readFileSync(path.join(RUNDIR, 'state.json'), 'utf8'));
     assert.equal(state.artifacts.diagramUrl, 'https://claude.ai/artifact/abc');
   });
@@ -261,6 +299,41 @@ describe('completion gate is reachable', () => {
     const out = JSON.parse(gate('completion').stdout);
     assert.equal(out.complete, true, JSON.stringify(out.conditions.filter((c) => c.status === 'fail'), null, 2));
     assert.match(out.verdict, /PASSED/);
+  });
+
+  /**
+   * §Q16 — a wrong effort is a degradation, a wrong model is an inversion.
+   *
+   * `--agent` pins the director's model but *not* its effort (measured, both directions), so the
+   * gate reads `CLAUDE_EFFORT` and reports it. The temptation is to fail on a mismatch. That would
+   * turn a finished four-hour run into `BLOCKED` over something that did not change **who** held
+   * product authority — so the effort is recorded in the detail and never in the status.
+   */
+  test('a director effort mismatch is reported, not failed', () => {
+    // The tier is read from the director's own subagent transcript (§S4), so the fixture writes
+    // one: `<main transcript minus .jsonl>/subagents/agent-<id>.{meta.json,jsonl}`. The main thread
+    // is deliberately a different model — nothing may read it for this.
+    const state = JSON.parse(fs.readFileSync(path.join(RUNDIR, 'state.json'), 'utf8'));
+    const TX = path.join(TMP, 'transcripts');
+    const dir = path.join(TX, String(state.projectRoot).replace(/[/.]/g, '-'));
+    fs.mkdirSync(path.join(dir, state.sessionId, 'subagents'), { recursive: true });
+    const line = (model, effort) => `${JSON.stringify({ type: 'assistant', effort, message: { model } })}\n`;
+    fs.writeFileSync(path.join(dir, `${state.sessionId}.jsonl`), line('claude-sonnet-5', 'high'));
+    fs.writeFileSync(path.join(dir, state.sessionId, 'subagents', 'a.meta.json'),
+      JSON.stringify({ agentType: 'hyperpowers-director', spawnDepth: 1 }));
+    fs.writeFileSync(path.join(dir, state.sessionId, 'subagents', 'a.jsonl'),
+      line('claude-fable-5', 'low'));
+
+    const out = JSON.parse(execFileSync('node',
+      [path.join(ROOT, 'scripts', 'verify-completion.mjs'), '--project', PROJECT, '--run', RUN, '--gate', 'completion'],
+      { encoding: 'utf8', env: { ...env(), HYPERPOWERS_TRANSCRIPT_ROOT: TX } }));
+
+    assert.equal(out.complete, true,
+      `effort must not fail completion: ${JSON.stringify(out.conditions.filter((c) => c.status === 'fail'), null, 2)}`);
+    const tier = out.conditions.find((c) => c.id === '13.12b-director-model');
+    assert.notEqual(tier.status, 'fail', 'a degradation is not an inversion');
+    assert.match(tier.detail, /claude-fable-5/, 'the director subagent is what was measured');
+    assert.match(tier.detail, /low/, 'and its effort is reported');
   });
 
   test('an open blocking finding fails the gate', () => {

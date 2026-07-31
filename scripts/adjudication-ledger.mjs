@@ -23,11 +23,11 @@ import path from 'node:path';
 import { parseArgs, fail, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { readJson, nowIso } from './lib/io.mjs';
-import { loadState, mutateState } from './lib/state.mjs';
+import { loadState, mutateState, refuseIfEnded } from './lib/state.mjs';
 import { validate } from './lib/validate.mjs';
 import { misplacedOrchestrationFile } from './lib/workspace.mjs';
-import { logEvent } from './lib/telemetry.mjs';
-import { REVIEW_ROUNDS, ALL_ROUNDS } from './lib/phases.mjs';
+import { logEvent, readEvents } from './lib/telemetry.mjs';
+import { ALL_ROUNDS } from './lib/phases.mjs';
 
 const { positional, flags } = parseArgs();
 const projectRoot = resolveProjectRoot(flags);
@@ -51,6 +51,15 @@ const CLOSES_WITHOUT_CHANGE = new Set(['rejected', 'duplicate', 'out_of_scope', 
 const COMMANDS = { record: cmdRecord, resolve: cmdResolve, status: cmdStatus, pending: cmdPending };
 const handler = COMMANDS[positional[0]];
 if (!handler) fail(`Usage: adjudication-ledger.mjs <${Object.keys(COMMANDS).join('|')}> --round <round> [flags]`);
+
+// §S14: a finished run's record is closed. This is the verb the measured incident names — a plan
+// coordinator that kept adjudicating for nine minutes past an abort, because ending a run ends its
+// state and not its subagents. `status` and `pending` only read, and auditing a finished run is
+// exactly what they are for.
+if (positional[0] === 'record' || positional[0] === 'resolve') {
+  const ended = refuseIfEnded(projectRoot, runId);
+  if (ended) fail(ended, 2);
+}
 handler();
 
 function requireRound() {
@@ -117,6 +126,18 @@ function cmdRecord() {
 
   const undecided = review.findings.filter((f) => !seen.has(f.id)).map((f) => f.id);
 
+  // Which of these findings had already been decided in this round. Read before the write, because
+  // `record` replaces the round wholesale and the previous decisions are gone a line later.
+  //
+  // §S22 established the rule on `resolve` and stopped there. `record` had the same disease and run 8
+  // measured it: **17 `adjudication` events for 14 distinct findings**, `plan-2` alone emitting 6 for
+  // 3 — the same three, two minutes apart. The state was right both times; only the journal
+  // over-counted, and the journal is what anyone measuring the run reads. Revisiting a decision is
+  // legitimate work and stays on the record under its own name; it is simply not a second finding.
+  const alreadyDecided = new Set(
+    (loadState(projectRoot, runId).adjudications?.[round]?.decisions ?? []).map((d) => d.finding_id),
+  );
+
   mutateState(projectRoot, runId, (s) => {
     s.adjudications[round] = {
       at: nowIso(),
@@ -125,7 +146,10 @@ function cmdRecord() {
     s.openBlockers = recomputeOpenBlockers(s);
   });
   for (const d of decisions) {
-    logEvent(projectRoot, runId, { type: 'adjudication', round, finding: d.finding_id, decision: d.decision, escalated: d.escalate_to_fable });
+    logEvent(projectRoot, runId, {
+      type: alreadyDecided.has(d.finding_id) ? 'adjudication_decision_replaced' : 'adjudication',
+      round, finding: d.finding_id, decision: d.decision, escalated: d.escalate_to_fable,
+    });
   }
 
   const state = loadState(projectRoot, runId);
@@ -152,12 +176,31 @@ function cmdResolve() {
   }
 
   let updated;
+  let alreadyResolved = false;
   try {
     updated = mutateState(projectRoot, runId, (s) => {
       const entry = s.adjudications[round];
       if (!entry) throw new Error(`No adjudication recorded for round '${round}'.`);
       const decision = entry.decisions.find((d) => d.finding_id === findingId);
+      // An escalation is closed by the answer, never by a note saying it was escalated.
+      //
+      // `escalated_to_fable` means "the coordinator is not the one who decides this" (spec §9). Any
+      // ten-character string satisfied `--evidence`, so the coordinator that escalated a *blocking*
+      // finding could close it with "escalated to the director as agreed" — the blocker left
+      // `openBlockers`, completion passed, and the director never decided. That is precisely the "make
+      // an inconvenient finding disappear" move the rest of this file exists to prevent, arriving
+      // through the one verb built to demand proof.
+      if (decision?.decision === 'escalated_to_fable') {
+        throw new Error(
+          `'${findingId}' is escalated to the director, so the coordinator cannot resolve it. What `
+          + `closes an escalation is the director's decision: record it, replacing this one —\n`
+          + `  adjudication-ledger.mjs record --round ${round} --file <decisions.json>\n`
+          + `with the finding decided \`accepted\` or \`rejected\` and the director's rationale. `
+          + `Re-recording is on the record as \`adjudication_decision_replaced\`, so nothing is hidden.`,
+        );
+      }
       if (!decision) throw new Error(`No decision recorded for finding '${findingId}' in round '${round}'.`);
+      alreadyResolved = decision.resolved === true;
       decision.resolved = true;
       decision.resolved_evidence = flags.evidence;
       decision.resolved_at = nowIso();
@@ -168,8 +211,29 @@ function cmdResolve() {
     fail(err.message, 2);
   }
 
-  logEvent(projectRoot, runId, { type: 'adjudication_resolved', round, finding: findingId });
-  emitJson({ round, finding: findingId, resolved: true, evidence: updated.resolved_evidence });
+  // Two different facts must not share an event name — the same discipline that keeps
+  // `policy_blocked` apart from `policy_violation`. Runs 6 and 7 both logged more
+  // `adjudication_resolved` events than there were findings, because re-stating a resolution looked
+  // identical to closing a new one, and anyone counting the record would have over-counted the work
+  // the run actually did. Replacing evidence is legitimate and stays on the record under its own
+  // name; only the first closure counts as a closure.
+  //
+  // "Ever closed" is asked of the journal, not of the state field: `record` replaces a round
+  // wholesale and resets `resolved` to false — a *documented* flow, since closing an escalation
+  // requires a re-record — so the in-memory flag forgets. Run 9 measured the result: 14
+  // `adjudication_resolved` events for 13 findings, the extra one a record/resolve interleave on
+  // one finding. Telemetry is append-only by design, which makes it the one authority this
+  // question has; deriving from it keeps the journal self-consistent by construction.
+  const everResolved = alreadyResolved || readEvents(projectRoot, runId).some(
+    (e) => (e.type === 'adjudication_resolved' || e.type === 'adjudication_resolution_replaced')
+      && e.round === round && e.finding === findingId,
+  );
+  logEvent(projectRoot, runId, {
+    type: everResolved ? 'adjudication_resolution_replaced' : 'adjudication_resolved',
+    round,
+    finding: findingId,
+  });
+  emitJson({ round, finding: findingId, resolved: true, replaced: everResolved, evidence: updated.resolved_evidence });
 }
 
 function cmdPending() {

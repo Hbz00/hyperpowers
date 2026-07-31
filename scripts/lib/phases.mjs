@@ -7,11 +7,10 @@
  *
  * Two deliberate departures from spec §11, both forced by measured harness behaviour:
  *
- *  1. `WAITING_FOR_USER` is removed as a mid-run state. Ledger B1/B2 show a skill's `model:`
- *     pin is cleared when the user sends a new message but survives Stop-hook continuations.
- *     A mid-run stop-and-wait would therefore silently demote Fable to the session default
- *     model. All user interaction happens inside the opening turn via `AskUserQuestion`,
- *     which is a tool call and does not end the turn. See ADR-0001.
+ *  1. `WAITING_FOR_USER` is removed as a mid-run state. The director is a subagent and has no
+ *     `AskUserQuestion` at all — the harness removes it from every subagent (ledger R1), with no
+ *     frontmatter bypass. It asks by writing a question packet and stopping; the main thread
+ *     renders it and re-dispatches with the answer (§S6). See ADR-0001 and its two amendments.
  *
  *  2. `SUSPENDED` is added. The harness caps consecutive Stop-hook blocks (ledger D4). Rather
  *     than being cut off mid-flight when the cap is reached, the controller voluntarily
@@ -22,7 +21,6 @@ export const TERMINAL_PHASES = Object.freeze([
   'COMPLETE',
   'BLOCKED',
   'ABORTED',
-  'BUDGET_EXCEEDED',
   'POLICY_VIOLATION',
 ]);
 
@@ -59,15 +57,18 @@ export const PHASES = Object.freeze({
   BRAINSTORMING: {
     owner: 'fable',
     summary:
-      'The only interactive phase. Clarify the need with AskUserQuestion inside this turn, ' +
-      'delegating exploration to Sonnet.',
+      'The only interactive phase. Clarify the need by asking the user through the main ' +
+      'thread, delegating exploration to Sonnet.',
     successors: ['DESIGN_DRAFT', 'ABORTED', 'BLOCKED'],
     requires: ['brainstorm'],
     next:
-      'Continue `superpowers:brainstorming` under the Hyperpowers overrides. Use ' +
-      '`AskUserQuestion` for every user-facing question — it is a tool call and keeps the ' +
-      'turn (and the Fable model pin) alive. Delegate repository exploration to ' +
-      '`hyperpowers:sonnet-researcher`. When the need is consolidated, write ' +
+      'Continue `superpowers:brainstorming` under the Hyperpowers overrides. You cannot call ' +
+      '`AskUserQuestion` — it is removed from every subagent (§R1). Ask by writing a packet ' +
+      'into your run directory and registering it with `state-machine.mjs ask --run <RUN_ID> ' +
+      '--file <runDir>/pending-question.json`, then stop; the main thread renders it and ' +
+      'sends you back in with the answer. Collect your researchers *before* asking — parking ' +
+      'with a wave in flight costs a turn per returning child (§R7b). Delegate repository ' +
+      'exploration to `hyperpowers:sonnet-researcher`. When the need is consolidated, write ' +
       '`brainstorm-summary.md` and transition to DESIGN_DRAFT. From that point on, no user ' +
       'validation may be requested.',
   },
@@ -199,7 +200,7 @@ export const PHASES = Object.freeze({
   EXECUTION: {
     owner: 'opus',
     summary: 'Sonnet implements the work packages in waves; Opus checks each report.',
-    successors: ['SYSTEM_VERIFICATION', 'BLOCKED', 'BUDGET_EXCEEDED'],
+    successors: ['SYSTEM_VERIFICATION', 'BLOCKED'],
     requires: ['tasks:all-accepted'],
     next:
       'Delegate to `hyperpowers:opus-execution-coordinator`. It applies ' +
@@ -277,10 +278,16 @@ export const PHASES = Object.freeze({
       'Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/verify-completion.mjs" --run <RUN_ID> ' +
       '--gate completion`. It enforces the fourteen conditions of spec §13 mechanically. ' +
       'Read only the summary it prints — need, criteria and their status, tests, open ' +
-      'findings, residual risks, Opus recommendation, Codex verdict. Publish the product Mermaid ' +
-      'diagram (condition 14) — an Artifact when this session has one, otherwise a disclosed ' +
-      'fallback rendering — and record it with `state-machine.mjs artifact --name diagramUrl ' +
-      '--value <url> --source "<mermaid>"`. Then *generate* the report with ' +
+      'findings, residual risks, Opus recommendation, Codex verdict. For the product Mermaid ' +
+      'diagram (condition 14): write a short **Markdown** page — a title, a ```mermaid fence, two ' +
+      'or three sentences of what it means — into your run directory, and hand it to the main ' +
+      'thread with `state-machine.mjs publish-request --run <RUN_ID> --file <path> --title ' +
+      '"<what it shows>" --source "<mermaid>"`, then stop. Artifacts render Mermaid natively and ' +
+      'wrap the file in their own document skeleton, so hand-authored HTML is work nobody asked ' +
+      'for. **Do not call `Artifact` yourself** — a subagent\'s ' +
+      'publication returns a URL that never opens on anybody\'s screen, so the run would finish ' +
+      'with a diagram the user never saw. You are resumed once the URL is recorded. Then ' +
+      '*generate* the report with ' +
       '`node "${CLAUDE_PLUGIN_ROOT}/scripts/report.mjs" final --run <RUN_ID>` — writing it by hand ' +
       'silently drops the evidence matrix, the review trail, the measured cost and the inline ' +
       'diagram. Finally answer COMPLETE, REMEDIATE or BLOCKED.',
@@ -291,13 +298,20 @@ export const PHASES = Object.freeze({
     summary: 'Turn yielded below the Stop-hook block cap. Resumable, not failed.',
     successors: [],
     requires: [],
-    next: 'Run `/hyperpowers:resume` to continue this run in a fresh turn.',
+    // Addressed to the **user**, and it says so, because `nextAction()` is injected verbatim into
+    // the director's context (§S8). This used to read "Run `/hyperpowers:resume` to continue this
+    // run" — an instruction the director read as its own. It could not run a slash command, so it
+    // found the script behind it and called `resume-run.mjs` directly: measured twice in run 6, 16
+    // and 35 seconds after the suspension. The circuit breaker was being cleared by the thing it
+    // had just stopped, and the system had asked for it.
+    next: 'This run is suspended and waiting on its user, who resumes it with `/hyperpowers:resume`. '
+      + 'If you are an agent reading this: you are not the one who resumes a run. Do not call '
+      + '`resume-run.mjs`, and do not transition out of SUSPENDED — stop and let the run rest.',
   },
 
   COMPLETE: { owner: 'system', summary: 'Feature accepted on evidence.', successors: [], requires: [], next: '' },
   BLOCKED: { owner: 'system', summary: 'Insoluble failure; human decision required.', successors: [], requires: [], next: '' },
   ABORTED: { owner: 'system', summary: 'Run abandoned deliberately.', successors: [], requires: [], next: '' },
-  BUDGET_EXCEEDED: { owner: 'system', summary: 'A configured bound was hit.', successors: [], requires: [], next: '' },
   POLICY_VIOLATION: { owner: 'system', summary: 'A hard policy was breached.', successors: [], requires: [], next: '' },
 });
 
@@ -373,8 +387,13 @@ export function isKnownPhase(phase) {
  */
 export function canTransition(from, to) {
   if (!isKnownPhase(from) || !isKnownPhase(to)) return false;
-  if (to === 'BLOCKED' || to === 'ABORTED' || to === 'POLICY_VIOLATION' || to === 'BUDGET_EXCEEDED') return true;
-  if (to === 'SUSPENDED') return !isTerminal(from);
+  // A run ends once. The failure states are reachable from anywhere so that a run in trouble can
+  // always be stopped — but "from anywhere" was implemented without looking at `from` at all, which
+  // also made `COMPLETE → BLOCKED` legal: an accepted run retro-blocked, or an aborted one re-ended
+  // under a different reason, rewriting an outcome whose record is supposed to be closed (§S14).
+  if (isTerminal(from)) return false;
+  if (to === 'BLOCKED' || to === 'ABORTED' || to === 'POLICY_VIOLATION') return true;
+  if (to === 'SUSPENDED') return true;
   return PHASES[from].successors.includes(to);
 }
 

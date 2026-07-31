@@ -378,16 +378,6 @@ const UNREBINDABLE = new Set([
 ]);
 
 /**
- * Name bound by a function definition anywhere in the command, or `null` when nothing protected
- * is rebound.
- *
- * The splitter flattens a function body into ordinary top-level commands, which is safe for
- * chains but wrong here in a specific way: it analyses the body as if it ran once, and loses the
- * fact that the definition *rebinds a name*. `git() { …; }; git status` therefore classified as
- * a plain `git status` read while every subsequent `git` in that shell ran attacker-chosen code.
- * Both POSIX forms are recognised: `name()` and `function name`.
- */
-/**
  * Builtins that can make a name resolve to something other than the program on `PATH`.
  *
  * The whole allowlist rests on one unstated assumption: that the word `git` still denotes Git when
@@ -491,6 +481,16 @@ function resolverRebindingIn(command) {
   return null;
 }
 
+/**
+ * Name bound by a function definition anywhere in the command, or `null` when nothing protected
+ * is rebound.
+ *
+ * The splitter flattens a function body into ordinary top-level commands, which is safe for
+ * chains but wrong here in a specific way: it analyses the body as if it ran once, and loses the
+ * fact that the definition *rebinds a name*. `git() { …; }; git status` therefore classified as
+ * a plain `git status` read while every subsequent `git` in that shell ran attacker-chosen code.
+ * Both POSIX forms are recognised: `name()` and `function name`.
+ */
 function functionDefinitionIn(command) {
   let tokens;
   try {

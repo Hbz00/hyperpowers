@@ -447,7 +447,7 @@ Cibles initiales :
 | Décisions produit            |    Majoritaires |    Préparées |          Aucune |
 | Décisions techniques locales | Exceptionnelles | Majoritaires | Recommandations |
 
-Ces seuils constituent des objectifs d’observation, pas des blocages absolus.
+Ces seuils constituent des objectifs d’observation basés sur des hypothèses de conception, pas des blocages absolus.
 
 ## 6.3 Le paquet décisionnel envoyé à Fable
 

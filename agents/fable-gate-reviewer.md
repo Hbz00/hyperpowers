@@ -1,6 +1,6 @@
 ---
 name: fable-gate-reviewer
-description: Renders a product verdict on a bounded decision packet. Use only when the director must decide from a subagent context; the main-thread director normally decides inline.
+description: Renders a product verdict on a bounded decision packet, for a coordinator that needs one without returning to the director. The director decides inline; this exists so a nested agent is never blocked waiting on it.
 model: fable
 effort: xhigh
 tools: Read

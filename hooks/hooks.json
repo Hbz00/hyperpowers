@@ -1,9 +1,9 @@
 {
-  "description": "Hyperpowers deterministic guarantees: read-only Git, the autonomy loop, agent-report enforcement, and durable state across compaction. These live in plugin hooks because plugin agents ignore their own `hooks` and `permissionMode` frontmatter (validation ledger B3).",
+  "description": "Hyperpowers deterministic guarantees: read-only Git, the autonomy loop (on SubagentStop, because the director is a subagent and only a SubagentStop block re-drives one — ledger R6), agent-report enforcement, and durable state across compaction. These live in plugin hooks because plugin agents ignore their own `hooks` and `permissionMode` frontmatter (validation ledger B3). Two hooks share SubagentStop; measured in S3 T24, both run and a block wins over an allow.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Workflow|EnterWorktree|ExitWorktree",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Workflow|EnterWorktree|ExitWorktree|Agent",
         "hooks": [
           {
             "type": "command",
@@ -43,6 +43,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-controller.mjs\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/validate-agent-report.mjs\"",
             "timeout": 20
           }
@@ -57,6 +67,18 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-context.mjs\"",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/subagent-controller.mjs\"",
+            "timeout": 30
           }
         ]
       }

@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "question-packet.schema.json",
+  "title": "Question packet",
+  "description": "What the director returns instead of calling AskUserQuestion, which the harness removes from every subagent (ledger R1). The shape mirrors AskUserQuestion's own input so the main thread renders it rather than reinterpreting it \u2014 a relay that has to translate is a relay that can quietly change the question.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "askedAt",
+    "phase",
+    "questions"
+  ],
+  "properties": {
+    "askedAt": {
+      "type": "string",
+      "minLength": 20
+    },
+    "phase": {
+      "type": "string",
+      "minLength": 3
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question",
+          "header",
+          "options"
+        ],
+        "properties": {
+          "question": {
+            "type": "string",
+            "minLength": 8
+          },
+          "header": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 12
+          },
+          "multiSelect": {
+            "type": "boolean"
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "label",
+                "description"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "answeredAt": {
+      "type": "string"
+    },
+    "answers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

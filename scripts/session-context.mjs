@@ -46,8 +46,9 @@ await runHook(
     // (Escape, a crash, a closed terminal) captured the next session opened in that project —
     // any session, for any unrelated work — and the Stop controller then blocked every attempt
     // to end a turn until the user discovered `/hyperpowers:abort`. Adoption is a decision, so
-    // it belongs to `/hyperpowers:resume`, which is also the only thing that can re-establish
-    // the director's model pin (ADR-0001).
+    // it belongs to `/hyperpowers:resume` — or, better, to relaunching as the director agent,
+    // which re-establishes the tier by harness enforcement rather than by a pin that does not
+    // hold against an interactively chosen session model (ADR-0001 amendment, §Q16).
     if (!runId) {
       runId = listRuns(projectRoot).find((candidate) => {
         const state = tryLoadState(projectRoot, candidate);

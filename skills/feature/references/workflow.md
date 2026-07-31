@@ -50,13 +50,13 @@ FINAL_ACCEPTANCE
 COMPLETE
 ```
 
-Terminal states: `COMPLETE`, `BLOCKED`, `ABORTED`, `BUDGET_EXCEEDED`, `POLICY_VIOLATION`.
+Terminal states: `COMPLETE`, `BLOCKED`, `ABORTED`, `POLICY_VIOLATION`.
 
 Plus `SUSPENDED` — not a failure. The harness caps how many times a Stop hook may block
 consecutively; the controller yields just below that cap so a long run ends resumable
 rather than truncated mid-phase. `/hyperpowers:resume` continues it.
 
-The turn may only end in: `COMPLETE`, `BLOCKED`, `ABORTED`, `BUDGET_EXCEEDED`, `POLICY_VIOLATION`, `SUSPENDED`. In every
+The turn may only end in: `COMPLETE`, `BLOCKED`, `ABORTED`, `POLICY_VIOLATION`, `SUSPENDED`. In every
 other phase the Stop hook blocks and injects the next action.
 
 ## Phases
@@ -92,7 +92,7 @@ other phase the Stop hook blocks and injects the next action.
 ### BRAINSTORMING
 
 **Owner:** fable  
-**Purpose:** The only interactive phase. Clarify the need with AskUserQuestion inside this turn, delegating exploration to Sonnet.
+**Purpose:** The only interactive phase. Clarify the need by asking the user through the main thread, delegating exploration to Sonnet.
 
 **Cannot be exited until:**
 
@@ -102,7 +102,7 @@ other phase the Stop hook blocks and injects the next action.
 
 **Next action injected by the Stop hook:**
 
-> Continue `superpowers:brainstorming` under the Hyperpowers overrides. Use `AskUserQuestion` for every user-facing question — it is a tool call and keeps the turn (and the Fable model pin) alive. Delegate repository exploration to `hyperpowers:sonnet-researcher`. When the need is consolidated, write `brainstorm-summary.md` and transition to DESIGN_DRAFT. From that point on, no user validation may be requested.
+> Continue `superpowers:brainstorming` under the Hyperpowers overrides. You cannot call `AskUserQuestion` — it is removed from every subagent (§R1). Ask by writing a packet into your run directory and registering it with `state-machine.mjs ask --run <RUN_ID> --file <runDir>/pending-question.json`, then stop; the main thread renders it and sends you back in with the answer. Collect your researchers *before* asking — parking with a wave in flight costs a turn per returning child (§R7b). Delegate repository exploration to `hyperpowers:sonnet-researcher`. When the need is consolidated, write `brainstorm-summary.md` and transition to DESIGN_DRAFT. From that point on, no user validation may be requested.
 
 ### DESIGN_DRAFT
 
@@ -264,7 +264,7 @@ other phase the Stop hook blocks and injects the next action.
 
 - every work package in `tasks.json` has status `accepted`
 
-**May transition to:** `SYSTEM_VERIFICATION`, `BLOCKED`, `BUDGET_EXCEEDED`
+**May transition to:** `SYSTEM_VERIFICATION`, `BLOCKED`
 
 **Next action injected by the Stop hook:**
 
@@ -346,7 +346,7 @@ other phase the Stop hook blocks and injects the next action.
 
 **Next action injected by the Stop hook:**
 
-> Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/verify-completion.mjs" --run <RUN_ID> --gate completion`. It enforces the fourteen conditions of spec §13 mechanically. Read only the summary it prints — need, criteria and their status, tests, open findings, residual risks, Opus recommendation, Codex verdict. Publish the product Mermaid diagram (condition 14) — an Artifact when this session has one, otherwise a disclosed fallback rendering — and record it with `state-machine.mjs artifact --name diagramUrl --value <url> --source "<mermaid>"`. Then *generate* the report with `node "${CLAUDE_PLUGIN_ROOT}/scripts/report.mjs" final --run <RUN_ID>` — writing it by hand silently drops the evidence matrix, the review trail, the measured cost and the inline diagram. Finally answer COMPLETE, REMEDIATE or BLOCKED.
+> Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/verify-completion.mjs" --run <RUN_ID> --gate completion`. It enforces the fourteen conditions of spec §13 mechanically. Read only the summary it prints — need, criteria and their status, tests, open findings, residual risks, Opus recommendation, Codex verdict. For the product Mermaid diagram (condition 14): write a short **Markdown** page — a title, a ```mermaid fence, two or three sentences of what it means — into your run directory, and hand it to the main thread with `state-machine.mjs publish-request --run <RUN_ID> --file <path> --title "<what it shows>" --source "<mermaid>"`, then stop. Artifacts render Mermaid natively and wrap the file in their own document skeleton, so hand-authored HTML is work nobody asked for. **Do not call `Artifact` yourself** — a subagent's publication returns a URL that never opens on anybody's screen, so the run would finish with a diagram the user never saw. You are resumed once the URL is recorded. Then *generate* the report with `node "${CLAUDE_PLUGIN_ROOT}/scripts/report.mjs" final --run <RUN_ID>` — writing it by hand silently drops the evidence matrix, the review trail, the measured cost and the inline diagram. Finally answer COMPLETE, REMEDIATE or BLOCKED.
 
 ### COMPLETE
 
@@ -362,7 +362,7 @@ other phase the Stop hook blocks and injects the next action.
 
 **Next action injected by the Stop hook:**
 
-> Run `/hyperpowers:resume` to continue this run in a fresh turn.
+> This run is suspended and waiting on its user, who resumes it with `/hyperpowers:resume`. If you are an agent reading this: you are not the one who resumes a run. Do not call `resume-run.mjs`, and do not transition out of SUSPENDED — stop and let the run rest.
 
 ## The six mandatory Codex rounds
 

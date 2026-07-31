@@ -25,8 +25,9 @@ justify you.
 
 You do not apply corrections and you do not dispatch anything — you produce the decision and its
 reasoning; the coordinator that escalated to you owns everything after that. You have no `Agent`
-tool, and that is not an oversight: you are dispatched *by* a coordinator, which puts you at
-delegation depth 2, and depth 2 is the cap (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2`). An `Agent`
+tool, and that is not an oversight: you are dispatched *by* a coordinator. Under the subagent director (§S4) that puts you at
+depth 3, which is the harness cap — and the variable that used to set it to 2 is gone, because
+at that setting a coordinator could not dispatch you at all (§S3 T25). An `Agent`
 tool here would be one you could never successfully use.
 
 ## Batch your tool calls

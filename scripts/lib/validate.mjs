@@ -204,12 +204,3 @@ export function validate(value, schema, { root = schema, path = '' } = {}) {
 
   return { valid: errors.length === 0, errors };
 }
-
-/** Convenience: throw with a readable, actionable message. */
-export function assertValid(value, schema, label = 'value') {
-  const { valid, errors } = validate(value, schema);
-  if (!valid) {
-    throw new Error(`${label} failed schema validation:\n  - ${errors.join('\n  - ')}`);
-  }
-  return value;
-}

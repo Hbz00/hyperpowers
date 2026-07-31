@@ -19,10 +19,10 @@ import { artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { validate } from './lib/validate.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { readJson, readText, nowIso } from './lib/io.mjs';
-import { loadState, mutateState, gateInputDigest } from './lib/state.mjs';
+import { loadState, mutateState, gateInputDigest, refuseIfEnded, reviewedArtifactDigest } from './lib/state.mjs';
 import { REVIEW_ROUNDS, EXTRA_ROUNDS, ALL_ROUNDS } from './lib/phases.mjs';
 import { logEvent } from './lib/telemetry.mjs';
-import { gitLines } from './lib/review-pack.mjs';
+import { gitPathsZ } from './lib/review-pack.mjs';
 import { directorTier } from './lib/transcript.mjs';
 import { splitByBaseline, HYPERPOWERS_OWN_FILES } from './lib/workspace.mjs';
 
@@ -37,6 +37,30 @@ const a = artifacts(projectRoot, runId);
 const state = loadState(projectRoot, runId);
 const conditions = [];
 const add = (id, description, status, detail = '') => conditions.push({ id, description, status, detail });
+
+/**
+ * Conditions whose own text offers the director a choice, and which therefore have to see one made.
+ *
+ * Scoped deliberately, and narrowly. Most `unverifiable` statuses mean *the environment could not
+ * answer*: no runtime check is declared, Git is unavailable, the transcript is absent, the review
+ * predates artefact-version recording. Asking for a residual risk about "Git could not be queried" is
+ * noise, and noise is how a real signal gets ignored — the same argument that scoped the drift check to
+ * the last round in the first place.
+ *
+ * What belongs here is the one condition that says *"State the change as residual risk, or run an extra
+ * round"*: a promise the gate makes on the director's behalf, which nothing checked. An id registers
+ * itself at the point that promise is printed, so the two cannot drift apart.
+ *
+ * The value anchors the statement in time: `{ file }` for a condition about a document (the
+ * statement must postdate the document's last edit), or `{ at }` for a condition about something
+ * with no single file — the implementation tree, an unobservable tier — where the honest floor is
+ * the timestamp of the fact the statement discharges. A citation is a token, and a token with no
+ * version behind it discharges its condition for ever: state the risk once, then keep editing the
+ * document, and the gate stays satisfied by a sentence describing a change two edits ago. Comparing
+ * the statement's timestamp against the anchor is the same invariant as `gateInputDigest` — a claim
+ * does not carry over to a state it was not made about — using only fields that already exist.
+ */
+const mustBeStated = new Map();
 
 /**
  * Everything runs from `main()`, called at the very bottom of this module, and that placement is
@@ -61,6 +85,7 @@ const add = (id, description, status, detail = '') => conditions.push({ id, desc
 function main() {
   const GATES = { design: designGate, plan: planGate, completion: completionGate };
   GATES[gate]();
+  dischargeUnverifiable();
 
   const failed = conditions.filter((c) => c.status === 'fail');
   const unverifiable = conditions.filter((c) => c.status === 'unverifiable');
@@ -77,27 +102,54 @@ function main() {
   };
 
   try {
-    mutateState(projectRoot, runId, (s) => {
-      // The revision this verdict judged. `mutateState` bumps it after this callback returns, so
-      // the verdict is stamped with the state it will land in rather than the one it read.
+    // Evaluate always — re-running this to audit a finished run is legitimate and must keep
+    // working. **Record only while the run is live.** On an aborted run this wrote `state.gates`
+    // three times, seven to nine minutes after the end, from a coordinator nobody could stop: a
+    // closed record was still being appended to. Reporting is auditing; recording is writing.
+    const live = !refuseIfEnded(projectRoot, runId);
+    if (live) {
+      mutateState(projectRoot, runId, (s) => {
+      // Digested from `state` — the object the conditions were actually evaluated against — and never
+      // from the one `mutateState` reloads. Another agent may have recorded a blocker in between, and
+      // hashing *that* would stamp this verdict with a fingerprint of inputs it never judged: exactly
+      // what the digest exists to make impossible. Binding the judged state instead means a
+      // concurrent change simply makes the stored verdict stale, and the transition refuses it until
+      // the verifier has run again.
+      //
       // `unverifiable` is tolerated by the gate but must not vanish with it. The contract says the
       // director may accept such a condition *as stated residual risk*; storing only a pass/fail and
       // a count left nothing for the report to state, so the acceptance existed only in whatever the
       // director happened to write. The ids are cheap and make the toleration auditable.
-      s.gates[gate] = {
-        passed,
-        at: result.evaluatedAt,
-        inputs: gateInputDigest(projectRoot, runId, s, gate),
-        reason: passed ? null : failed.map((f) => f.id).join(', '),
-        unverifiable: unverifiable.map((c) => `${c.id}: ${c.detail ?? 'no detail'}`),
-        evidence: `${conditions.filter((c) => c.status === 'pass').length}/${conditions.length} conditions passed`,
-      };
-    });
-    logEvent(projectRoot, runId, { type: 'gate', gate, passed, failed: failed.map((f) => f.id) });
+        s.gates[gate] = {
+          passed,
+          at: result.evaluatedAt,
+          inputs: gateInputDigest(projectRoot, runId, state, gate),
+          reason: passed ? null : failed.map((f) => f.id).join(', '),
+          unverifiable: unverifiable.map((c) => `${c.id}: ${c.detail ?? 'no detail'}`),
+          evidence: `${conditions.filter((c) => c.status === 'pass').length}/${conditions.length} conditions passed`,
+        };
+      });
+      logEvent(projectRoot, runId, { type: 'gate', gate, passed, failed: failed.map((f) => f.id) });
+    }
   } catch { /* gate recording must not mask the result */ }
+
+  // Drop the static label; keep every measurement.
+  //
+  // The only reader of this output is the director — a subagent whose context is billed on Fable
+  // and, because a subagent's prompt cache dies after five minutes of idling, rewritten in full on
+  // every resumption. Run 7 kept **38k characters** of gate output in that context across four
+  // calls, the single largest contributor to it.
+  //
+  // The first attempt at this stripped `detail` from passing conditions too, and it was wrong: a
+  // pass often *is* the measurement. `13.12b-director-model` passes and its detail names the model
+  // and effort actually observed; `criteria-covered` passes and its detail says how many criteria
+  // matched. Removing those would have saved bytes by deleting the answer. `description` is a fixed
+  // label derivable from the id and repeated verbatim on every call — that, and only that, goes.
+  const terse = ({ description, ...rest }) => rest;
 
   emitJson({
     ...result,
+    conditions: conditions.map(terse),
     summary: `${conditions.filter((c) => c.status === 'pass').length} passed, ${failed.length} failed, ` +
       `${conditions.filter((c) => c.status === 'not_applicable').length} not applicable, ${unverifiable.length} unverifiable.`,
     verdict: passed
@@ -108,6 +160,86 @@ function main() {
   });
 
   process.exit(passed ? 0 : 6);
+}
+
+/**
+ * Every `unverifiable` condition must be discharged by one of the two branches the gate offers.
+ *
+ * The gate has always said an unverifiable condition is acceptable *as stated residual risk* — "State
+ * the change as residual risk, or run an extra round." Runs 7 and 8 each locked two artefacts that had
+ * moved after their last review, all four gates reported it, and all four passed. Run 8's archive says
+ * what happened next: four residual risks recorded, sourced `DESIGN-002`, `PLAN-004`, `PLAN-006`,
+ * `IMPL-001` — every one a finding the director would have recorded anyway, and **not one citing the
+ * drift**. `extraReviews: {}` both runs, so the other branch was not taken either.
+ *
+ * The disjunction was offered and neither side of it performed. That is not §18 being too permissive;
+ * §18's extra round is deliberately optional, because forcing a Codex round onto every typo fix is the
+ * cost this avoided in the first place. It is the *cheaper* branch having no mechanical form, so it
+ * read as free.
+ *
+ * `risk --add --source` already exists, so the discharge is one command and one entry somebody can
+ * read. The status of the unverifiable condition itself is deliberately unchanged: what fails is the
+ * absence of a decision about it, which is the thing the contract asked for and nothing checked.
+ */
+function dischargeUnverifiable() {
+  const open = conditions.filter((c) => c.status === 'unverifiable' && mustBeStated.has(c.id));
+  if (open.length === 0) return;
+
+  // Matched on the citation, not on prose: a risk that happens to mention the same words is not a
+  // decision about this condition. `--source` is the field that makes the link checkable — and the
+  // anchor is what stops the link outliving what it described.
+  const bySource = new Map();
+  for (const r of state.residualRisks ?? []) {
+    if (typeof r === 'string' || !r.source) continue;
+    bySource.set(r.source, [...(bySource.get(r.source) ?? []), r]);
+  }
+
+  const stale = [];
+  const undischarged = [];
+  for (const c of open) {
+    const risks = bySource.get(c.id);
+    if (!risks) { undischarged.push(c.id); continue; }
+    const anchor = mustBeStated.get(c.id) ?? {};
+    // Three anchor kinds, in increasing strength. A `file` anchor compares the statement's
+    // timestamp against the document's last edit; an `at` anchor against the moment the
+    // discharged fact was established; a `digest` anchor requires the statement to have been made
+    // about *this exact* implementation tree. The digest form exists because a timestamp floor
+    // let one statement authorise unlimited later edits: any risk newer than the review stayed
+    // valid however many times the tree moved afterwards — reproduced end-to-end, including with
+    // the implementation replaced by broken code. Anything that fails to resolve reads as
+    // undischargeable, the direction that asks for a fresh decision.
+    if (anchor.digest !== undefined) {
+      if (!risks.some((r) => r.implementationDigest === anchor.digest)) stale.push(c.id);
+      continue;
+    }
+    const at = Math.max(...risks.map((r) => Date.parse(r.at ?? '')).filter(Number.isFinite), -Infinity);
+    if (at === -Infinity) { undischarged.push(c.id); continue; }
+    const threshold = anchor.file !== undefined
+      ? changedAt(anchor.file)
+      : (Number.isFinite(Date.parse(anchor.at ?? '')) ? Date.parse(anchor.at) : Infinity);
+    if (at < threshold) stale.push(c.id);
+  }
+
+  const owed = [...undischarged, ...stale];
+  add('unverifiable-stated', 'Every condition that offered a choice has had one made',
+    owed.length ? 'fail' : 'pass',
+    owed.length
+      ? `${undischarged.length ? `nothing states ${undischarged.join(', ')}. ` : ''}`
+        + `${stale.length ? `the statement for ${stale.join(', ')} describes a version that has `
+          + `since moved — a waiver is about one specific state, and this is not it any more. ` : ''}`
+        + `Record it — \`state-machine.mjs risk --add "<what is unproven and why it is acceptable>" `
+        + `--source ${owed[0]}\` — or run the one extra review §18 allows, which removes the condition `
+        + `instead of accepting it.`
+      : `${open.length} unverifiable condition(s), each cited by a residual risk stated about the current state`);
+}
+
+/** When a file last changed, or `Infinity` when that cannot be established — which fails safe. */
+function changedAt(file) {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return Infinity;
+  }
 }
 
 // ------------------------------------------------------------------- gates ----
@@ -136,7 +268,18 @@ function roundsToAccountFor(artifact) {
 
 /** Shared across all three gates: every round ran, everything decided, nothing left open. */
 function checkReviewCycle(artifact) {
-  for (const round of roundsToAccountFor(artifact)) {
+  // Only the **last** round for this artefact is asked whether it read the current text.
+  //
+  // Round 1 → remediation → round 2 is the mandated cycle, so round 1's digest is stale by
+  // construction in every correct run — and run 7 duly reported `review-design-1-current` and
+  // `review-plan-1-current` as unverifiable while nothing at all was wrong. A condition that fires
+  // on every healthy run carries no signal and teaches people to skim past the ones that do. This
+  // is the same reasoning that excluded the `implementation` rounds; it simply was not applied
+  // here first time.
+  const accountable = roundsToAccountFor(artifact);
+  const lastRound = accountable[accountable.length - 1];
+
+  for (const round of accountable) {
     const review = readJson(a.review(round), null);
     if (!review || review.status !== 'completed') {
       add(`review-${round}`, `Codex round ${round} completed`, 'fail', review ? `status=${review.status}: ${review.reason ?? ''}` : 'no review artefact');
@@ -144,15 +287,77 @@ function checkReviewCycle(artifact) {
     }
     add(`review-${round}`, `Codex round ${round} completed`, 'pass', `${review.model} @ ${review.effort}, verdict ${review.verdict}, ${review.findings.length} findings`);
 
+    // Did the artefact move after the round that last read it?
+    //
+    // Run 6 locked a design that had been edited after its final review, and every condition
+    // passed, because "a review exists" and "a review of this text exists" were the same check.
+    // `unverifiable`, not `fail`: §18 permits post-round-2 remediation when round 2 raised no new
+    // blocker, and that is exactly what happened there. The gate tolerates this status and the
+    // director must state it as residual risk — so the fact stops being invisible without forcing a
+    // Codex round onto every typo fix. The implementation rounds record a tree digest now too:
+    // excluding them was argued from "the tree moves between every round", which stopped being true
+    // when this check narrowed to the last round — and the production run proved the cost: a
+    // round-6 blocker was fixed *after* round 6, no round read the fix, and the gate said nothing.
+    if (round === lastRound) {
+      const now = reviewedArtifactDigest(projectRoot, runId, artifact);
+      // Registered here, at the one place the "state it or re-review" offer is made, and only for a
+      // digest that genuinely differs — a review predating the field could not be compared and makes
+      // no such offer. The anchor is the document for design/plan (a later edit makes the statement
+      // stale by mtime); the implementation has no single file, so the anchor is the **current tree
+      // digest itself**: the waiver must have been stated about this exact tree. A review-timestamp
+      // floor was tried first and it made the waiver eternal — one statement after the review
+      // stayed valid through every subsequent rewrite, broken code included.
+      if (now !== null && review.artifactDigest && review.artifactDigest !== now) {
+        const file = { design: a.design, plan: a.plan }[artifact];
+        mustBeStated.set(`review-${round}-current`, file ? { file } : { digest: now });
+      }
+      add(`review-${round}-current`, `The ${artifact} is as round ${round} read it`,
+        now === null ? 'not_applicable' : !review.artifactDigest ? 'unverifiable' : review.artifactDigest === now ? 'pass' : 'unverifiable',
+        now === null
+          ? `no current version of the ${artifact} could be computed`
+          : !review.artifactDigest
+            ? 'this review predates artefact-version recording, so the two cannot be compared'
+            : review.artifactDigest === now
+              ? 'byte-identical to the version reviewed'
+              : artifact === 'implementation'
+                ? `the working tree moved after round ${round} read it — remediation is the usual `
+                  + 'cause, and the fix was never adversarially read. State what changed as residual '
+                  + 'risk, or run the one extra round §18 allows (implementation-extra).'
+                : `the ${artifact} was edited after its last review — the locked text was never `
+                  + 'adversarially read. State the change as residual risk, or run an extra round.');
+    }
+
     const decisions = state.adjudications?.[round]?.decisions ?? [];
     const decided = new Set(decisions.map((d) => d.finding_id));
     const undecided = review.findings.filter((f) => !decided.has(f.id)).map((f) => f.id);
-    add(`adjudicated-${round}`, `Every ${round} finding adjudicated`, undecided.length ? 'fail' : 'pass',
-      undecided.length ? `undecided: ${undecided.join(', ')}` : `${decisions.length} decisions recorded`);
+    // Decisions must also point at findings the *current* review actually contains. A re-run
+    // round replaces the review file, and a decision for a finding that no longer exists is an
+    // adjudication of evidence nobody can read — run 9 carried a DESIGN-003 decision whose
+    // finding survives in no review file. Failing here forces the round to be re-adjudicated
+    // against what the current attempt actually reported.
+    const known = new Set(review.findings.map((f) => f.id));
+    const orphaned = decisions.filter((d) => !known.has(d.finding_id)).map((d) => d.finding_id);
+    add(`adjudicated-${round}`, `Every ${round} finding adjudicated`,
+      undecided.length || orphaned.length ? 'fail' : 'pass',
+      undecided.length || orphaned.length
+        ? `${undecided.length ? `undecided: ${undecided.join(', ')}. ` : ''}`
+          + `${orphaned.length ? `decisions for findings absent from the current review (a re-run `
+            + `replaced it): ${orphaned.join(', ')} — re-record the adjudication against the `
+            + `current findings` : ''}`
+        : `${decisions.length} decisions recorded`);
 
-    const unresolved = decisions.filter((d) => d.decision === 'accepted' && !d.resolved).map((d) => d.finding_id);
-    add(`resolved-${round}`, `Accepted ${round} corrections proven applied`, unresolved.length ? 'fail' : 'pass',
-      unresolved.length ? `not proven resolved: ${unresolved.join(', ')}` : 'all accepted corrections carry resolution evidence');
+    // Every unresolved decision, not only the accepted ones.
+    //
+    // `adjudication-ledger` puts `accepted`, `needs_evidence` and `escalated_to_fable` in
+    // `REQUIRES_RESOLUTION` — "neither is an answer" — and stores all three with `resolved: false`,
+    // while the decisions that close without changing anything are stored already resolved. This
+    // filtered on `accepted`, so two of the three obligations closed a round merely by existing: a
+    // finding could be parked as `needs_evidence` and the gate would report the round complete.
+    // Reading the same field the ledger writes is what keeps the two halves saying the same thing.
+    const unresolved = decisions.filter((d) => d.resolved !== true)
+      .map((d) => `${d.finding_id} (${d.decision})`);
+    add(`resolved-${round}`, `Open ${round} obligations discharged`, unresolved.length ? 'fail' : 'pass',
+      unresolved.length ? `not proven resolved: ${unresolved.join(', ')}` : 'every obligation carries resolution evidence');
   }
 
   // Scoped to this artefact's own rounds: the design gate has no business failing on an
@@ -302,13 +507,38 @@ function completionGate() {
   {
     const present = (evidence?.checks ?? []).filter((c) => TEST_CHECKS.includes(c.name));
     const failing = present.filter((c) => c.status !== 'pass' && c.status !== 'absent');
+    // The detail names both halves. It used to interpolate every *present* name into "all pass",
+    // so a matrix recording nothing but `absent` suites rendered "unit-tests all pass" — a check
+    // that ran nothing, reported as a check that passed, to the one reader (the director) who
+    // decides on the sentence.
+    const passing = present.filter((c) => c.status === 'pass').map((c) => c.name);
+    const absent = present.filter((c) => c.status === 'absent').map((c) => c.name);
     add('13.2-tests', 'Every recorded test suite passes',
       present.length === 0 ? 'unverifiable' : failing.length ? 'fail' : 'pass',
       present.length === 0
         ? 'no test suite was recorded in the evidence matrix'
         : failing.length
           ? `failing: ${failing.map((c) => `${c.name} (${c.command} → ${c.status})`).join('; ')}`
-          : `${present.map((c) => c.name).join(', ')} all pass`);
+          : `${passing.join(', ') || 'none'} pass${absent.length ? `; ${absent.join(', ')} absent` : ''}`);
+
+    // The composition nobody documented: every per-check `absent` is sanctioned by the contract,
+    // but a matrix in which *nothing at all was executed* is not a proof of anything. Reproduced:
+    // all suites absent, no runtime check, criteria evidence of one assertion string —
+    // `complete: true`, and the run reached COMPLETE. `unverifiable` + a forced statement rather
+    // than `fail`, because a genuinely test-less deliverable (docs, configuration) must stay
+    // finishable — with the waiver written down, not for free.
+    const executed = (evidence?.checks ?? [])
+      .filter((c) => [...TEST_CHECKS, 'runtime'].includes(c.name) && c.status === 'pass');
+    if (evidence && executed.length === 0) mustBeStated.set('13.2b-something-executed', { file: a.evidence });
+    add('13.2b-something-executed', 'At least one behavioural check was actually executed',
+      !evidence ? 'fail' : executed.length ? 'pass' : 'unverifiable',
+      !evidence
+        ? 'evidence.json is missing'
+        : executed.length
+          ? `executed and passing: ${executed.map((c) => c.name).join(', ')}`
+          : 'no test suite and no runtime check was executed — nothing behavioural was proven. '
+            + 'State why that is acceptable as a residual risk (`risk --add … --source '
+            + '13.2b-something-executed`), or record an executed check.');
   }
 
   for (const [num, name, label] of [
@@ -318,9 +548,23 @@ function completionGate() {
     ['13.4c', 'runtime', 'Runtime behaviour was exercised where applicable'],
   ]) {
     const check = (evidence?.checks ?? []).find((c) => c.name === name);
+    // The contract says `runtime` may be "absent **with a reason**" (condition 4c) — the reason
+    // clause was documented and nothing read it, so a bare `runtime: absent` was rendered
+    // not-applicable for free. With a reason it still is; without one it is a decision nobody
+    // wrote down, and the discharge mechanism is exactly for those.
+    const bareRuntimeAbsent = name === 'runtime' && check?.status === 'absent'
+      && !String(check.output_excerpt ?? '').trim();
+    if (bareRuntimeAbsent) mustBeStated.set(`${num}-${name}`, { file: a.evidence });
     add(`${num}-${name}`, label,
-      !check ? 'unverifiable' : check.status === 'pass' ? 'pass' : check.status === 'absent' ? 'not_applicable' : 'fail',
-      check ? `${check.command} → ${check.status}` : 'not recorded in the evidence matrix');
+      !check ? 'unverifiable'
+        : check.status === 'pass' ? 'pass'
+          : check.status === 'absent' ? (bareRuntimeAbsent ? 'unverifiable' : 'not_applicable') : 'fail',
+      !check ? 'not recorded in the evidence matrix'
+        : bareRuntimeAbsent
+          ? `${check.command} → absent, with no reason recorded. The contract permits an absent `
+            + 'runtime check only with one: put the reason in `output_excerpt`, or state it as a '
+            + `residual risk (\`risk --add … --source ${num}-${name}\`).`
+          : `${check.command} → ${check.status}`);
   }
 
   const failingBefore = evidence?.failing_before_fix ?? [];
@@ -336,6 +580,41 @@ function completionGate() {
     open.length ? open.map((b) => (typeof b === 'string' ? b : b.id)).join(', ') : 'none');
 
   checkReviewCycle('implementation');
+
+  // `tasks:all-accepted` is EXECUTION's exit requirement, so it is checked once, on the way out, and
+  // never again. Nothing stops a status moving afterwards — `task --status pending` is a documented
+  // verb with no phase constraint — and completion read `tasks.json` only for file ownership. So a
+  // package could regress to `pending` after EXECUTION and the run could still declare success on
+  // work it had stopped claiming was done. Re-asserting it here costs one read.
+  const packages = readJson(a.tasks, null)?.tasks;
+  const decomposed = Array.isArray(packages) && packages.length > 0;
+  const unaccepted = decomposed
+    ? packages.filter((t) => t.status !== 'accepted').map((t) => `${t.id} (${t.status ?? 'pending'})`)
+    : [];
+  // And the evidence that justified each acceptance still exists and still says what it said.
+  // Acceptance checks the newest referenced report once, on the way out of EXECUTION; nothing
+  // stopped that file being deleted or rewritten afterwards while "accepted" stood — the status
+  // survived its own justification. Same re-assertion as the status check above, one layer down.
+  const attemptOf = (rid) => Number(/-attempt(\d+)$/.exec(String(rid))?.[1] ?? 0);
+  const unevidenced = decomposed
+    ? packages.filter((t) => t.status === 'accepted').flatMap((t) => {
+        const intended = [...(t.reports ?? [])].sort((x, y) => attemptOf(x) - attemptOf(y)).at(-1);
+        if (!intended) return [`${t.id} (no report referenced)`];
+        const report = readJson(a.report(intended), null);
+        if (!report) return [`${t.id} ('${intended}' unreadable)`];
+        const overridden = (t.notes ?? []).some((n) => String(n).startsWith('accepted despite'));
+        if (report.status !== 'success' && !overridden) return [`${t.id} ('${intended}' is '${report.status}' with no recorded override)`];
+        return [];
+      })
+    : [];
+  add('packages-accepted', 'Every work package is still accepted, on evidence that still exists',
+    decomposed && unaccepted.length === 0 && unevidenced.length === 0 ? 'pass' : 'fail',
+    !decomposed
+      ? 'tasks.json records no work packages'
+      : unaccepted.length || unevidenced.length
+        ? `${unaccepted.length ? `not accepted: ${unaccepted.join(', ')}. ` : ''}`
+          + `${unevidenced.length ? `accepted without surviving evidence: ${unevidenced.join(', ')}` : ''}`
+        : `${packages.length} package(s) accepted, each with its newest report on disk`);
 
   const residue = evidence?.residue ?? {};
   const residueFound = Object.entries(residue).filter(([, v]) => Array.isArray(v) && v.length);
@@ -365,11 +644,22 @@ function completionGate() {
   // means the PreToolUse hook stopped an attempt before it ran — the control working, not a
   // breach — and counting those here made a single blocked `git commit` (or even a blocked
   // `Workflow` call) fail the gate permanently, since telemetry is append-only.
+  //
+  // Read from **both** records the guard writes. It stamps escalating drift durably into
+  // `state.gitDrift` and also emits a `policy_violation` event, and this read only the event — while
+  // `logEvent` swallows a failed append by design, so a mutation that was detected and durably
+  // recorded could still be reported as "repository state never changed". Treating the absence of the
+  // weaker record as proof is the shape of the defect, not the missing write.
   const executed = readEvents().filter((e) => e.type === 'policy_violation');
   const blocked = readEvents().filter((e) => e.type === 'policy_blocked');
-  add('13.11-no-git-mutation', 'No Git mutation was executed', executed.length ? 'fail' : 'pass',
-    executed.length
-      ? `${executed.length} mutation(s) detected after the fact: ${executed.map((e) => (e.drift ?? []).join('; ')).join(' | ')}`
+  const recorded = (state.gitDrift ?? []).filter((d) => d.escalated !== false);
+  const mutations = [
+    ...executed.map((e) => (e.drift ?? []).join('; ')),
+    ...recorded.map((d) => `${(d.drift ?? []).join('; ')}${d.command ? ` [${d.command}]` : ''}`),
+  ].filter(Boolean);
+  add('13.11-no-git-mutation', 'No Git mutation was executed', mutations.length ? 'fail' : 'pass',
+    mutations.length
+      ? `${mutations.length} mutation(s) detected after the fact: ${[...new Set(mutations)].join(' | ')}`
       : `repository state never changed${blocked.length ? ` (${blocked.length} attempt(s) blocked before execution — the policy held)` : ''}`);
 
   const fallbacks = readEvents().filter((e) => e.type === 'fallback');
@@ -401,9 +691,26 @@ function completionGate() {
       ? `observed ${tier.observed} (${tier.family}), expected the ${tier.expected} tier`
       : null;
   const observedModel = state.observedDirectorModel ?? tier.observed;
+  // How the run was launched, and at what effort, ride in the detail — never in the status. A wrong
+  // *model* means product authority was exercised by the wrong tier: an inversion, and a fail. A
+  // wrong *effort* on the right model is a degradation — the run is still the system it claims to
+  // be, reasoning less hard about it. Failing completion on that would turn a finished four-hour
+  // run into `BLOCKED` over something that did not change who decided. Reported, not enforced.
+  const launchNote = tier.agent
+    ? ` Directed by the \`${tier.agent}\` subagent at depth ${tier.spawnDepth ?? '?'}` +
+      `${tier.effort ? `, effort \`${tier.effort}\`` : ''}` +
+      `${tier.effortOk === false ? ` — configured for \`${tier.expectedEffort}\`` : ''}.`
+    : ' The director subagent was not found in this session\'s transcripts, so the tier could not be'
+      + ' read here.';
+  // An unobservable tier is not agreement (`transcript.mjs` says so in terms), and it used to be
+  // free: `unverifiable` never fails a gate, and nothing owed a decision about it. Registering it
+  // makes the silence cost a written statement — the same discharge every other tolerated
+  // condition pays. Anchored on the run's start: any risk stated during the run discharges it.
+  if (!wrong && !observedModel) mustBeStated.set('13.12b-director-model', { at: state.createdAt });
   add('13.12b-director-model', 'The director tier ran on the configured model',
     wrong ? 'fail' : observedModel ? 'pass' : 'unverifiable',
-    wrong ?? observedModel ?? 'not observed');
+    (wrong ?? observedModel ?? 'not observed — state this as residual risk (`risk --add … --source '
+      + '13.12b-director-model`): a tier nobody observed is a tier nobody verified') + launchNote);
 
   // Spec §13 condition 13. This cannot verify that Fable *judged* well — no mechanism can — but
   // it can verify the run actually reached the gate through the director's phase rather than
@@ -440,7 +747,13 @@ function completionGate() {
     add('13.14-product-diagram', 'A product diagram was published and its URL recorded',
       url ? 'pass' : 'fail',
       !url
-        ? 'record it with `state-machine.mjs artifact --name diagramUrl` once published (spec §13 condition 14)'
+        // Naming the verb matters, and naming the *wrong* verb matters more: this said
+        // `artifact --name diagramUrl`, which is how a director publishes the page itself and
+        // produces a URL that opens on nobody's screen (§S21) — the reported bug, restated as an
+        // instruction by the very check that is supposed to catch it.
+        ? 'write the page into the run directory, then `state-machine.mjs publish-request --file '
+          + '<path> --title "<what it shows>" --source "<mermaid>"` and stop. The main thread '
+          + 'publishes it and records the URL (spec §13 condition 14).'
         : isArtifact
           ? `published as an Artifact: ${url}`
           : `recorded, but not as an Artifact — this is a fallback rendering, so no shareable ` +
@@ -551,23 +864,28 @@ function normalise(p) {
 }
 
 /**
+ * Files Hyperpowers itself used to write into the working tree. Nothing writes them any more —
+ * nothing is installed at all — but the exemption stays for repositories
+ * configured by an earlier version, where the file is still present and still owned by no work
+ * package. Removing it would fail condition §13.10 on exactly those projects.
+ */
+const OWN_FILES = new Set(HYPERPOWERS_OWN_FILES);
+
+/**
  * Files changed in the working tree, or `null` when Git cannot tell us.
  *
  * `null` and `[]` mean different things and must not be conflated: `[]` is "nothing changed",
  * `null` is "we could not find out", and only the first of those can justify passing a
  * scope-drift check.
  */
-/**
- * Files Hyperpowers itself writes into the working tree. They are not the feature's changes and
- * no work package will ever own them, so counting them as scope drift would fail condition
- * §13.10 on every project where `/hyperpowers:setup` did its job.
- */
-const OWN_FILES = new Set(HYPERPOWERS_OWN_FILES);
-
 function changedFiles() {
-  const tracked = gitLines(projectRoot, ['diff', '--name-only', 'HEAD']);
-  const untracked = gitLines(projectRoot, ['ls-files', '--others', '--exclude-standard']);
-  if (tracked === null && untracked === null) return null;
+  // `-z` both times: these names are compared against work-package ownership, and a C-quoted
+  // non-ASCII name matches nothing it should (see `gitPathsZ`).
+  const tracked = gitPathsZ(projectRoot, ['diff', '--name-only', '-z', 'HEAD']);
+  const untracked = gitPathsZ(projectRoot, ['ls-files', '--others', '--exclude-standard', '-z']);
+  // Either query failing means the inventory is unknown. `[]` is "nothing changed" and only that
+  // can justify passing a scope check — the doc block above says so, and `&&` said otherwise.
+  if (tracked === null || untracked === null) return null;
   return [...(tracked ?? []), ...(untracked ?? [])].filter((f) => !OWN_FILES.has(normalise(f)));
 }
 

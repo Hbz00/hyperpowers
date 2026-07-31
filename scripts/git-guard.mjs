@@ -17,61 +17,17 @@
  * honestly and stopping.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { runHook, emitContext, emitAllowStop, projectRootFrom } from './lib/hookio.mjs';
 import { activeRunId, artifacts } from './lib/paths.mjs';
 import { readJson, writeJson } from './lib/io.mjs';
 import { tryLoadState, mutateState } from './lib/state.mjs';
 import { stopAllowed } from './lib/phases.mjs';
 import { logEvent } from './lib/telemetry.mjs';
-
-function git(projectRoot, args) {
-  try {
-    return execFileSync('git', args, {
-      cwd: projectRoot, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Fingerprint the mutable parts of a repository. Deliberately excludes the working tree:
- * editing files is the whole point of a run. What must not change is *Git* state.
- */
-function fingerprint(projectRoot) {
-  const gitDir = git(projectRoot, ['rev-parse', '--absolute-git-dir']);
-  if (!gitDir) return null;
-  return {
-    head: git(projectRoot, ['rev-parse', 'HEAD']) ?? 'unborn',
-    branch: git(projectRoot, ['branch', '--show-current']) ?? '',
-    refs: hash(git(projectRoot, ['for-each-ref', '--format=%(refname) %(objectname)']) ?? ''),
-    stash: hash(git(projectRoot, ['stash', 'list']) ?? ''),
-    // `--raw`, not `--name-status`: the raw form carries the blob SHAs on both sides, so
-    // *replacing* the staged content of an already-staged file changes this hash. With the
-    // name-and-status form it did not — the path is still there and its status is still `M`, so
-    // a script that re-staged different content moved nothing material and the run was told its
-    // repository had not changed. Reproduced before fixing.
-    staged: hash(git(projectRoot, ['diff', '--cached', '--raw']) ?? ''),
-    // The local config decides where pushes go, what runs as a hook, and which identity signs.
-    // It was omitted because none of HEAD/refs/index/stash moves when it changes — which is
-    // exactly the argument for hashing it separately rather than for leaving it unwatched. Only
-    // the hash is stored: the raw values include remote URLs and user identity, and this file
-    // lives outside the repository the user chose to put them in. Measured stable across
-    // `npm install` and a full test run before being added, because a guard that fires on
-    // ordinary work is a guard people switch off.
-    config: hash(git(projectRoot, ['config', '--list', '--local']) ?? ''),
-  };
-}
-
-function hash(text) {
-  // Small, dependency-free digest; collisions are irrelevant for change detection.
-  let h = 0;
-  for (let i = 0; i < text.length; i += 1) h = (Math.imul(31, h) + text.charCodeAt(i)) | 0;
-  return String(h);
-}
+// The producer is shared, not duplicated: `init` and `resume` stamp the same object this guard
+// diffs, so the baseline exists *before* the first opaque Bash call instead of being absorbed
+// from it. Re-declaring the field set here would let the two drift — `describeDrift` tolerates a
+// missing key by design, so a drifted producer silently stops escalating that field.
+import { gitFingerprint, fingerprintPath } from './lib/git-fingerprint.mjs';
 
 /**
  * Which fields changed, split by whether the change can only have been a mutation.
@@ -136,21 +92,26 @@ await runHook(
      * The two halves must agree on when the policy is in force, so both read `stopAllowed`. This
      * returns before fingerprinting rather than after, so a session that stays bound to a
      * finished run also stops paying six `git` subprocesses per Bash call. `/hyperpowers:resume`
-     * clears the stale snapshot, which is what makes an early return safe: the first observation
-     * after a resume establishes a new baseline instead of blaming the resumed run for
-     * everything that happened while it was stopped.
+     * re-stamps a *fresh* snapshot after a suspension, which is what makes an early return safe:
+     * the resumed run is measured from the moment it takes Git back, not blamed for what the
+     * user legitimately did while it was stopped — and, unlike the deletion this replaces, a
+     * mutation inside the first post-resume Bash call is still seen.
      */
     if (stopAllowed(state.phase)) return emitAllowStop();
 
-    const current = fingerprint(projectRoot);
+    const current = gitFingerprint(projectRoot);
     if (!current) return emitAllowStop();
 
     const a = artifacts(projectRoot, runId);
-    const snapshotPath = path.join(a.base, 'git-fingerprint.json');
+    const snapshotPath = fingerprintPath(a.base);
     const previous = readJson(snapshotPath, null);
     writeJson(snapshotPath, current);
 
     if (!previous) return emitAllowStop(); // first observation establishes the baseline
+    // A fingerprint from a different producer version cannot be compared field-by-field — every
+    // hashed field would read as drift, failing §13.11 for the act of upgrading the plugin
+    // mid-run. The new snapshot just written becomes the baseline.
+    if (previous.v !== current.v) return emitAllowStop();
 
     const { escalating, observed } = describeDrift(previous, current);
     if (escalating.length === 0 && observed.length === 0) return emitAllowStop();

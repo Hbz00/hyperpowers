@@ -144,6 +144,7 @@ a deliberate boundary rather than an oversight:
   except that writes into any `.git/` directory are refused. Use Claude Code's permission rules
   if you want a hard workspace boundary.
 
-Both are reachable through the same `.claude/settings.json` that `/hyperpowers:setup` writes, so
-adding them is a configuration decision you can make deliberately — not something this plugin
-quietly claims to have done for you.
+Both are configured through Claude Code's own permission settings, which are yours. Hyperpowers
+writes nothing into your project — not even its own runtime contract, which travels on the launch
+command — so adding them is a decision you make deliberately, not something this plugin quietly
+claims to have done for you.

@@ -15,10 +15,20 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DIRECTOR_AGENT, bareAgentName } from './config.mjs';
 
 /** Anthropic cache multipliers: reads are cheap, writes carry a premium. */
 const CACHE_READ_MULTIPLIER = 0.1;
 const CACHE_WRITE_MULTIPLIER = 1.25;
+/**
+ * The 1-hour cache tier costs 2× input, not 1.25× — billed as a **differential** on top of the
+ * base write premium, never as a replacement split. The transcripts carry both a
+ * `cache_creation_input_tokens` total and a `cache_creation.{ephemeral_5m,ephemeral_1h}` split,
+ * and 30 rows of run 9 have a total *larger* than the split's sum — so `5m×1.25 + 1h×2.0` would
+ * silently lose the unattributed tokens, which is the under-counting direction this file forbids.
+ * The base bills every write token at 1.25×; this adds the missing 0.75× on the 1h share only.
+ */
+const CACHE_WRITE_1H_PREMIUM = 0.75;
 
 /**
  * USD per million tokens, from the harness model registry (ledger A4).
@@ -49,21 +59,17 @@ export function familyOf(modelId) {
 
 export function costOf(family, usage) {
   const p = FAMILY_PRICING[family] ?? FAMILY_PRICING.unknown;
-  const input = usage.inputTokens + usage.cacheReadTokens * CACHE_READ_MULTIPLIER + usage.cacheWriteTokens * CACHE_WRITE_MULTIPLIER;
+  const input = usage.inputTokens
+    + usage.cacheReadTokens * CACHE_READ_MULTIPLIER
+    + usage.cacheWriteTokens * CACHE_WRITE_MULTIPLIER
+    + (usage.cacheWrite1hTokens ?? 0) * CACHE_WRITE_1H_PREMIUM;
   return (input / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output;
 }
 
 function emptyUsage() {
-  return { messages: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
+  return { messages: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, costUsd: 0 };
 }
 
-/**
- * Aggregate a transcript by model family, separating main-thread work from subagent work.
- *
- * @param {string} transcriptPath
- * @param {{since?: string}} options `since` is an ISO timestamp; earlier messages are ignored,
- *        which is what makes per-run accounting possible inside a long-lived session.
- */
 /**
  * Where the harness keeps a session's subagent transcripts.
  *
@@ -94,6 +100,13 @@ function subagentTranscripts(transcriptPath) {
   }
 }
 
+/**
+ * Aggregate a transcript by model family, separating main-thread work from subagent work.
+ *
+ * @param {string} transcriptPath
+ * @param {{since?: string}} options `since` is an ISO timestamp; earlier messages are ignored,
+ *        which is what makes per-run accounting possible inside a long-lived session.
+ */
 export function analyseTranscript(transcriptPath, { since = null, cacheDir = null } = {}) {
   // The Stop controller calls this on every continuation — up to ~200 times per run — against a
   // transcript that only grows. Re-parsing it each time is O(n²) over a run and was the largest
@@ -121,7 +134,10 @@ export function analyseTranscript(transcriptPath, { since = null, cacheDir = nul
   // second half, the row-summing results written before §P7 would be served forever to runs whose
   // transcripts had stopped growing — the fix would be invisible on exactly the finished runs whose
   // numbers this project quotes. Bump this whenever the aggregation changes.
-  const cacheKey = `v2:${fingerprint}:${since ?? ''}`;
+  // v3: the 1h cache tier is billed at its real 2× rate. Left at v2, the memo would serve the
+  // pre-fix figure forever for exactly the finished runs whose economics this project quotes —
+  // §P7's defect, one field over.
+  const cacheKey = `v3:${fingerprint}:${since ?? ''}`;
   const cachePath = cacheDir ? path.join(cacheDir, 'transcript-analysis.json') : null;
   if (cachePath) {
     try {
@@ -200,6 +216,8 @@ export function analyseTranscript(transcriptPath, { since = null, cacheDir = nul
           outputTokens,
           cacheReadTokens: u.cache_read_input_tokens ?? 0,
           cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
+          // Absent on older transcripts → 0 → the base 1.25× alone, which is yesterday's figure.
+          cacheWrite1hTokens: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
         },
       });
     }
@@ -214,6 +232,7 @@ export function analyseTranscript(transcriptPath, { since = null, cacheDir = nul
       target.outputTokens += usage.outputTokens;
       target.cacheReadTokens += usage.cacheReadTokens;
       target.cacheWriteTokens += usage.cacheWriteTokens;
+      target.cacheWrite1hTokens += usage.cacheWrite1hTokens ?? 0;
       target.costUsd += cost;
     }
     bucket.models.add(model);
@@ -315,41 +334,257 @@ export function measuredCostFor(state) {
 /**
  * Which model is actually directing this run, against the tier it was configured for.
  *
- * The architecture's central premise is that product authority sits with the strongest tier. A
- * skill declares `model: fable` to secure that — and the pin does **not** always take. Measured on
- * this machine, same account, same plugin build, same `/hyperpowers:feature` invocation:
+ * The architecture's central premise is that product authority sits with the strongest tier, and
+ * the pin securing it has moved twice. A skill's `model: fable` does not hold against an
+ * interactively chosen session model — two real runs on a 200k-line project directed themselves
+ * with Opus before anyone noticed, one of them for $4.19, with every gate, dispatch and hook
+ * behaving. A *main-session* agent's pin holds but has to be launched (§Q16). A **subagent's**
+ * `effort:` holds unconditionally (§S3 T26) and its `model:` holds against the session default —
+ * outranked only by a per-invocation argument and `CLAUDE_CODE_SUBAGENT_MODEL` (§V2) — which is
+ * why the director is one, and why this function reads what was *observed* rather than declared.
  *
- *   `claude -p "/pintest"`            skill pinning fable → **claude-fable-5**   the pin wins
- *   interactive session opened on Opus → **claude-opus-5**    the session model wins
+ * So this reads the director's own subagent transcript, not the main thread's. Under the subagent
+ * architecture the main thread is whatever model the user happens to be on, and checking it would
+ * be checking nothing while reporting a verdict — this codebase's signature defect.
  *
- * Two real runs on a 200k-line project directed themselves with Opus before anyone noticed, one of
- * them for $4.19. Nothing was broken — every gate, every dispatch, every hook behaved — the run was
- * simply not the system it claimed to be.
- *
- * `ok: null` means the question could not be asked yet: no transcript, or no assistant message in
- * it. That is not the same as agreement and callers must not treat it as one.
+ * `ok: null` means the question could not be asked yet: no transcript, or the director has not been
+ * dispatched. That is not agreement and callers must not treat it as one.
  */
 export function directorTier(state) {
   const expected = state?.config?.models?.director ?? 'fable';
+  const expectedEffort = state?.config?.effort?.default ?? 'high';
+  const base = {
+    expected, expectedEffort, observed: null, family: null, ok: null,
+    agent: null, spawnDepth: null, effort: null, effortOk: null,
+  };
+
   const transcript = transcriptPathFor(state);
-  if (!transcript) return { expected, observed: null, family: null, ok: null };
-  const observed = currentMainThreadModel(transcript);
-  if (!observed) return { expected, observed: null, family: null, ok: null };
-  const family = familyOf(observed);
-  return { expected, observed, family, ok: family === expected };
+  if (!transcript) return base;
+  const found = directorSubagent(transcript);
+  if (!found?.model) return base;
+
+  const family = familyOf(found.model);
+  return {
+    ...base,
+    agent: found.agentType,
+    spawnDepth: found.spawnDepth,
+    observed: found.model,
+    family,
+    ok: family === expected,
+    effort: found.effort,
+    // A wrong effort is a degradation, not an inversion — callers report it and never fail on it.
+    effortOk: found.effort ? found.effort === expectedEffort : null,
+  };
+}
+
+export function subagentsDir(transcriptPath) {
+  return path.join(String(transcriptPath).replace(/\.jsonl$/, ''), 'subagents');
 }
 
 /**
- * The model that produced the most recent main-thread message.
- * Used to verify that the director tier is actually the model the run believes it is.
+ * One dispatched agent's meta, by the id the harness uses everywhere.
+ *
+ * `tasks[].id` in the status-line payload **is** this id — measured, and it is what lets a renderer
+ * name a row without any convention anyone has to maintain in a prompt.
  */
-export function currentMainThreadModel(transcriptPath) {
-  let raw;
+export function subagentMeta(transcriptPath, agentId) {
+  return readJsonQuiet(path.join(subagentsDir(transcriptPath), `agent-${agentId}.meta.json`));
+}
+
+/**
+ * Cost by **role**, with the cost-term split — derived from the transcripts on demand.
+ *
+ * The tier bands answer "did the pyramid hold?", and measurement showed that question addresses
+ * about a quarter of the bill: output tokens are 24–27% of cost, and the largest line of the last
+ * production run was not a tier but a *role* — the review adjudicator summed across dispatches,
+ * 36.7%, above the director. This table is what would have made that visible on the first run
+ * instead of the ninth. Per role and per term (generation / cache write / cache read / fresh
+ * input), because the remedy differs: "re-read" wants less carried context, "re-write after a
+ * cache expiry" wants fewer windows or a cheaper tier, and they were being summed under one word.
+ *
+ * Derived, never stamped: one pass over the same files `analyseTranscript` reads, attributed by
+ * each subagent's meta `agentType` (the main thread is its own row). Requests are deduplicated by
+ * requestId within each file, the same rule §P7 established.
+ */
+export function analyseRoles(transcriptPath, { since = null } = {}) {
+  const cutoff = since ? Date.parse(since) : null;
+  const roles = new Map();
+  const add = (role, file) => {
+    if (!roles.has(role)) {
+      roles.set(role, {
+        role, dispatches: 0, messages: 0, outputTokens: 0,
+        generationUsd: 0, cacheWriteUsd: 0, cacheReadUsd: 0, freshInputUsd: 0, costUsd: 0,
+      });
+    }
+    const r = roles.get(role);
+    if (file) r.dispatches += 1;
+    return r;
+  };
+
+  const tally = (file, role) => {
+    let text;
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch {
+      return;
+    }
+    const bucket = add(role, true);
+    // Same request rule as `analyseTranscript` (§P7): one entry per requestId, first row's usage,
+    // except output tokens which take the max across the request's rows — the final row of a
+    // streamed request carries the full count.
+    const requests = new Map();
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      let row;
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const msg = row?.message;
+      const u = msg?.usage;
+      if (row?.type !== 'assistant' || !u) continue;
+      if (cutoff && Number.isFinite(Date.parse(row.timestamp ?? '')) && Date.parse(row.timestamp) < cutoff) continue;
+      const key = msg.requestId ?? row.requestId ?? `${file}:${requests.size}`;
+      const prior = requests.get(key);
+      if (prior) {
+        prior.out = Math.max(prior.out, u.output_tokens ?? 0);
+        continue;
+      }
+      requests.set(key, { model: msg.model, u, out: u.output_tokens ?? 0 });
+    }
+    for (const { model, u, out } of requests.values()) {
+      const p = FAMILY_PRICING[familyOf(model)] ?? FAMILY_PRICING.unknown;
+      bucket.messages += 1;
+      bucket.outputTokens += out;
+      bucket.generationUsd += (out / 1e6) * p.output;
+      bucket.cacheReadUsd += ((u.cache_read_input_tokens ?? 0) * CACHE_READ_MULTIPLIER / 1e6) * p.input;
+      bucket.cacheWriteUsd += (((u.cache_creation_input_tokens ?? 0) * CACHE_WRITE_MULTIPLIER
+        + (u.cache_creation?.ephemeral_1h_input_tokens ?? 0) * CACHE_WRITE_1H_PREMIUM) / 1e6) * p.input;
+      bucket.freshInputUsd += ((u.input_tokens ?? 0) / 1e6) * p.input;
+    }
+    bucket.costUsd = bucket.generationUsd + bucket.cacheWriteUsd + bucket.cacheReadUsd + bucket.freshInputUsd;
+  };
+
+  tally(transcriptPath, 'main-thread');
+  for (const file of subagentTranscripts(transcriptPath)) {
+    const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
+    const meta = readJsonQuiet(path.join(subagentsDir(transcriptPath), `agent-${id}.meta.json`));
+    tally(file, bareAgentName(meta?.agentType) || 'unknown-agent');
+  }
+  return [...roles.values()].sort((x, y) => y.costUsd - x.costUsd);
+}
+
+function readJsonQuiet(file) {
   try {
-    raw = fs.readFileSync(transcriptPath, 'utf8');
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
     return null;
   }
+}
+
+/**
+ * The ids of every subagent dispatched **by** `parentAgentId`, from the meta files on disk.
+ *
+ * Parentage has to be resolved here rather than recorded when a child starts: `SubagentStart`
+ * carries `agent_id` and `agent_type` but **no `parentAgentId`** — measured directly, §T1. The meta
+ * file beside the transcript does carry it, and is readable live (§S4 T28), so the registry stores
+ * only "which agents are running" and attribution is a read-time lookup. That ordering also makes
+ * the hook independent of whether the meta has landed by the time the start event fires.
+ *
+ * Returns `[]` on any unreadable directory. Callers use this to decide whether an agent is
+ * *waiting*, and the fail-open direction for that decision is "assume it is not" — see
+ * `liveChildren` in `state.mjs`.
+ */
+export function childAgents(transcriptPath, parentAgentId) {
+  if (!transcriptPath || !parentAgentId) return [];
+  const dir = subagentsDir(transcriptPath);
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.meta.json'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const file of files) {
+    const meta = readJsonQuiet(path.join(dir, file));
+    if (meta?.parentAgentId !== parentAgentId) continue;
+    out.push({ agentId: file.replace(/^agent-/, '').replace(/\.meta\.json$/, ''), meta });
+  }
+  return out;
+}
+
+/**
+ * The director's own subagent transcript, located from the main one.
+ *
+ * The harness writes each dispatched agent to `<main transcript minus .jsonl>/subagents/`, as a
+ * pair: `agent-<id>.meta.json` carrying `{agentType, description, toolUseId, spawnDepth}` and
+ * `agent-<id>.jsonl` carrying its messages. Measured (§S3 T28) — and measured **while the agent is
+ * still running**, which is what makes this checkable at the first transition rather than only
+ * after the fact.
+ *
+ * Identity deliberately comes from `agentType` here and not from `CLAUDE_CODE_AGENT`: that variable
+ * is set only for a `--agent` *main session* and is absent inside every dispatched subagent (§Q16
+ * T29). Reading it here would have silently answered "no director".
+ */
+export function directorSubagent(transcriptPath, agentName = DIRECTOR_AGENT) {
+  const dir = subagentsDir(transcriptPath);
+  let metas;
+  try {
+    metas = fs.readdirSync(dir).filter((f) => f.endsWith('.meta.json'));
+  } catch {
+    return null;
+  }
+
+  const candidates = [];
+  for (const file of metas) {
+    const full = path.join(dir, file);
+    let meta;
+    try {
+      meta = JSON.parse(fs.readFileSync(full, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (bareAgentName(meta?.agentType) !== bareAgentName(agentName)) continue;
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(full).mtimeMs;
+    } catch { /* ordering only */ }
+    candidates.push({
+      meta,
+      mtime,
+      jsonl: full.replace(/\.meta\.json$/, '.jsonl'),
+      agentId: file.replace(/^agent-/, '').replace(/\.meta\.json$/, ''),
+    });
+  }
+  if (!candidates.length) return null;
+
+  // Depth first, then recency.
+  //
+  // Recency alone was wrong for the same reason it is wrong in `dataRoot()`: it is not an identity
+  // claim. Run 6 grew a second `hyperpowers-director` at **depth 3** — dispatched by an adjudicator
+  // that read "reply to the director" as "dispatch the director" — and for four minutes its meta was
+  // the most recently written one. `subagent-controller` ignores anything not at depth 1 (§S13), so
+  // this reader disagreed with the other half of the same rule, and the completion gate would have
+  // reported the impostor's depth, model and effort as the run's.
+  //
+  // Preference, not filter, in three ranks: depth 1 is positive identity; no recorded depth is no
+  // evidence either way (metas predate the field); a *wrong* recorded depth is evidence against, and
+  // comes last — but is still answered rather than refused, because `directorTier` reports the depth
+  // and the completion gate prints it. Returning null there would hide the impostor instead of naming
+  // it, and would degrade condition 13.12b to `unverifiable` on a session where nothing is wrong.
+  const rank = (c) => (c.meta?.spawnDepth === 1 ? 0 : c.meta?.spawnDepth == null ? 1 : 2);
+  candidates.sort((a, b) => rank(a) - rank(b) || b.mtime - a.mtime);
+  const { meta, jsonl, agentId } = candidates[0];
+
+  let raw;
+  try {
+    raw = fs.readFileSync(jsonl, 'utf8');
+  } catch {
+    return null;
+  }
+  let model = null;
+  let effort = null;
   const lines = raw.split('\n');
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (!lines[i].trim()) continue;
@@ -359,7 +594,12 @@ export function currentMainThreadModel(transcriptPath) {
     } catch {
       continue;
     }
-    if (row.type === 'assistant' && !row.isSidechain && row.message?.model) return row.message.model;
+    if (row.type !== 'assistant') continue;
+    model ??= row.message?.model ?? null;
+    effort ??= row.effort ?? row.message?.effort ?? null;
+    if (model) break;
   }
-  return null;
+  // `agentId` is the id the harness uses everywhere, carried in the filename — the caller that needs
+  // to *name* the live director has it here and nowhere else, because no hook observes its start.
+  return { agentId, agentType: bareAgentName(meta.agentType), spawnDepth: meta.spawnDepth ?? null, model, effort };
 }

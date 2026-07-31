@@ -16,14 +16,22 @@ It never touches Git. You do all of that yourself.
 ```
 /plugin marketplace add Hbz00/hyperpowers
 /plugin install hyperpowers
-/hyperpowers:setup          # writes the environment contract, then tells you to confirm it with preflight
+```
+
+```
 /hyperpowers:feature <what you want built>
 ```
+
+**No install step, no settings file, no flags.** Hyperpowers writes nothing into your repository
+and requires nothing of your session. The command dispatches the director as a subagent, and a
+subagent's declared model and effort hold against whatever your session is on — so the run is
+directed by Fable however you launched Claude Code. The declaration is not the whole guarantee:
+the plugin also reads the model the director was *observed* running on, refuses to leave preflight
+on a mismatch, and re-checks it as a completion condition (ledger §V2).
 
 Requires the [Superpowers](https://github.com/obra/superpowers) plugin (≥6.0, validated against
 6.2.0) and an authenticated [Codex CLI](https://github.com/openai/codex). Preflight checks both and
 refuses to start without them — there are no silent fallbacks.
-Start your Claude Session on Fable model.
 
 ## Why it is shaped this way
 
@@ -42,8 +50,18 @@ demonstrably failed beforehand, that no file outside the plan changed, and that 
 really ran on the model it thought it did.
 
 **Autonomy needs brakes, not just a throttle.** A state machine with enforced gates, stall
-detection, circuit breakers and budget bounds. A run that cannot proceed stops in `BLOCKED` with a
+detection and circuit breakers. A run that cannot proceed stops in `BLOCKED` with a
 reason — a better outcome than a confident `COMPLETE` on unproven work.
+
+**And one brake it does not have, stated plainly.** Stall detection and the delegate registry are
+sampled when the director finishes a turn. A director stuck *inside* a delegate it dispatched never
+finishes one, so nothing samples — and no plugin can cancel an agent call already in flight. One run
+sat that way for nine hours before it was aborted by hand (ledger §V8). That is **detected, not
+recovered**: a run's idle time is derived from its own state file, and the status line — the one
+surface that keeps ticking while an agent is stuck — is where it surfaces. The remedy is yours:
+`/hyperpowers:abort`, or stopping the stuck agent from your session. Nothing in the plugin can
+cancel an agent call already in flight, and saying so is more useful than a brake that does not
+exist.
 
 ## What it will not do
 
@@ -55,10 +73,8 @@ reason — a better outcome than a confident `COMPLETE` on unproven work.
 - **Degrade silently.** An unavailable model either falls back along one documented path, recorded,
   or stops the run.
 
-`/hyperpowers:setup` disables Claude Code's advisor tool for the project so escalation goes up this
-plugin's ladder. That applies to every session in the project, not just Hyperpowers runs — it is
-written but not required, so delete it from `.claude/settings.json` if you would rather keep the
-advisor.
+Hyperpowers has its own escalation ladder, so a second advisor would arbitrate outside the run's
+ledger. It is **not required** and nothing installs it — preflight mentions it and moves on.
 
 ## When not to use it
 
@@ -85,7 +101,6 @@ Full numbers, including what the measurement got wrong before it got it right:
 
 | Command | What it does |
 | --- | --- |
-| `/hyperpowers:setup` | Writes the environment contract into `.claude/settings.json` (dry run by default) |
 | `/hyperpowers:feature <description>` | Runs a feature end to end |
 | `/hyperpowers:status` | Where a run is, what is blocking it, what it has cost |
 | `/hyperpowers:resume` | Continues a suspended or interrupted run |
@@ -104,9 +119,12 @@ Every phase has an owner, exit requirements that must exist on disk, and one leg
 successors. Transitions go through a single verb and are refused — with the reason — when a
 requirement is unmet.
 
-The whole run happens in **one turn**, driven by a Stop hook. That is not stylistic: a skill's
-model pin survives hook-forced continuations but is cleared the moment you send a message, so any
-mid-run pause would silently demote the director. See
+The whole run happens under **one director's authority**, driven by a `SubagentStop` hook that
+blocks with the next action. One *authority*, not necessarily one uninterrupted dispatch: the
+director yields resumably at the harness's block cap and for main-thread errands, and is resumed
+or re-dispatched onto the same run. It cannot reach you — the harness removes `AskUserQuestion`
+from every subagent — so when it needs an answer it writes a question, stops, and your session
+renders it and sends it back in. See
 [ADR-0001](docs/adr/0001-single-turn-user-contract.md).
 
 All state lives in `$CLAUDE_PLUGIN_DATA`, so a run survives compaction, session loss and restarts.
@@ -121,11 +139,18 @@ shareable, and required by the completion gate rather than offered by it.
 [`docs/validation-ledger.md`](docs/validation-ledger.md) records every load-bearing claim with its
 evidence and verdict, **including the ones that turned out to be wrong**:
 
-- Plugin manifests cannot contribute `env` — so `/hyperpowers:setup` is mandatory.
+- Plugin manifests cannot contribute `env`, which made an install step look unavoidable — until
+  every variable in it was retired by a measurement, so there is none.
 - Plugin dependency **strings** silently strip a semver range (`"name@^6.2.0"` does nothing); two
   reviewers concluded otherwise from the schema before someone read the consumer.
 - A skill's `model:` pin is turn-scoped, which reshaped the entire interaction contract — and does
-  not take at all against an interactively chosen session model, which cost two aborted runs.
+  not take at all against an interactively chosen session model, which cost two aborted runs. Its
+  `effort:` pin does not take either, in **either** direction, and neither does a *main-session
+  agent's* — the model pin holds there, the effort one does not.
+- A **subagent's** `model:` was documented here as unconditional, on the authority of a measurement
+  that had only ever tested `effort:`. Read from the binary, it is third in precedence behind an
+  environment variable and a per-invocation argument. It holds against the session default, which is
+  what this design needs — but the sentence was stronger than the evidence, in eleven places.
 
 ```
 npm test          # the whole suite
@@ -147,8 +172,9 @@ unreachable are the failure mode it exists to catch, and it has caught two.
 ## Configuration
 
 An optional `.hyperpowers.json` at your project root overrides budgets, timeouts, review models,
-concurrency and verification commands. It is re-read at every checkpoint, so raising a budget
-mid-run takes effect immediately. Defaults and the reasoning behind each:
+concurrency and verification commands. It is re-read at every checkpoint, so a change takes effect
+mid-run. Nothing in it can end a run: spend is reported once it passes `costNoticeUsd`, and whether
+an expensive run is still worth finishing is your decision, not the plugin's. Defaults and the reasoning behind each:
 [`scripts/lib/config.mjs`](scripts/lib/config.mjs).
 
 ## Documentation

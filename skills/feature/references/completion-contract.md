@@ -61,7 +61,6 @@ any sense the requester cares about. Load the `artifact-design` skill before bui
 
 - `BLOCKED` — a real impasse: an unresolvable critical finding, a missing dependency, repeated
   failure with no progress. Honest and useful.
-- `BUDGET_EXCEEDED` — a configured bound was hit. Raise it in `.hyperpowers.json` and resume.
 - `POLICY_VIOLATION` — a hard rule was breached.
 - `ABORTED` — abandoned deliberately.
 
