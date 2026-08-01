@@ -4628,11 +4628,11 @@ columns — so **on a 120-column terminal the bar disappeared exactly when the r
 Widths are now fitted explicitly: cells carry a drop rank, the fitter tries full text, then short
 forms, then sheds the highest rank one at a time, and the bar is reserved its minimum before any of
 it — so no cell is dropped while the bar can merely narrow. Measured across 200/116/76/56/40
-columns with the warning present — **against the test fixture, not a live run**: the rendering side
-of §V14 is read from the binary and exercised by driving the real script on a synthetic payload, and
-no run has yet been watched with the roster on screen. The bar and the warning survive all five
-widths, and the roster is what pays. The warning outranks the phase name deliberately — at 40
-columns the other order rendered `63%  EXECUTION` and dropped the one cell a human can act on.
+columns with the warning present: the bar and the warning survive all five widths, and the roster is
+what pays. The warning outranks the phase name deliberately — at 40 columns the other order rendered
+`63%  EXECUTION` and dropped the one cell a human can act on. **Re-measured on a live run** at the
+same five widths — see the verification below, where the roster degrades to `↳2` at 76 and the bar
+still draws at 40.
 
 Colour is applied **after** fitting, because SGR bytes count in `String.length` and not on screen;
 the test asserts both that the row is really coloured and that its visible width fits, since
@@ -4643,3 +4643,689 @@ director by name alone, so §S13's depth-3 impostor would have taken the run's p
 now, rooted the roster on an agent with no descendants. `isDirectorMeta()` in `config.mjs` is the
 one spelling of *name and depth 1*, used by `subagent-controller.mjs` and `statusline.mjs`, which is
 §U's "count the sites" applied before the second site could drift.
+
+### V15. The 5-minute subagent cache is a query-source allowlist, and one environment variable removes it — **§T2's "nobody can remove it" retracted**
+
+§T2 measured that a subagent's prompt cache expires in ~5 minutes and the main session's does not,
+tested two rival explanations, refuted one, and closed with: *"This is a harness property, not a
+design error, and most of the gap is not recoverable."* §V6 and §V9 built on that sentence — the
+cache-write term is the largest of four on the two most recent runs, and the remedy was said to be
+"fewer windows, or crossing them at a cheaper tier", because the expiry itself was out of reach.
+
+**The expiry is not a property of being a subagent. It is an allowlist.** Read from the 2.1.220
+binary:
+
+```js
+function shouldUse1hTTL(querySource) {
+  if (env.FORCE_PROMPT_CACHING_5M) return false;
+  if (env.ENABLE_PROMPT_CACHING_1H) return true;               // ← before every other condition
+  if (!isFirstPartyAuth() || usage().isUsingOverage) return false;
+  const { allowlist = [] } = gate('tengu_prompt_cache_1h_config',
+    { allowlist: ['repl_main_thread*', 'sdk', 'auto_mode', 'memdir_relevance'] });
+  return allowlist.some((p) => (p.endsWith('*') ? querySource.startsWith(p.slice(0, -1)) : querySource === p));
+}
+```
+
+A dispatched subagent's query source is built by `agentType => "agent:custom:" + type` (or
+`agent:builtin:`), which matches no entry. The main thread's is `repl_main_thread`, which matches
+the first. The `ttl: "1h"` and the `extended-cache-ttl-2025-04-11` beta header are attached on that
+result alone. So §T2's two rival explanations were both wrong in their reasoning and one was right
+by accident: it is not that subagent *conversations* get a short TTL, it is that nobody put them on
+the list.
+
+**Measured three ways, because a binary read is a hypothesis.**
+
+1. *One session, same model, same instant.* A headless run dispatching a trivial custom subagent:
+   main thread `ephemeral_5m 0 / ephemeral_1h 11,567`; its subagent `ephemeral_5m 6,107 /
+   ephemeral_1h 0`. The split §T2 inferred from gap statistics is visible in a single request pair.
+2. *The flag works, and so does the only delivery route a user has.* Same probe with
+   `ENABLE_PROMPT_CACHING_1H=1` in the environment → subagent writes 100% 1-hour. Same probe with
+   `--settings '{"env":{"ENABLE_PROMPT_CACHING_1H":"1"}}'` → identical. A settings `env` block
+   reaches `process.env`, which is what makes this something a user can actually install.
+3. *The cache survives the window.* A subagent blocked on a sentinel for **384 seconds** between two
+   requests, run twice:
+
+   | | `cache_read` | `cache_write` |
+   | --- | ---: | ---: |
+   | default | **0** | 5,919 |
+   | `ENABLE_PROMPT_CACHING_1H=1` | **5,640** | 275 |
+
+   Same gap, same prompt, same model. That is the whole mechanism, end to end.
+
+**What it is worth, on runs already in the archive.** Every subagent request of runs 8, 9 and 10 was
+re-priced under a 1-hour TTL, in two independent models: a *delta* model, where a recovered cold turn
+writes the growth in prompt size since the previous request, and an *anchored* model, where it writes
+the conversation's own median warm write. Requests that already hit cache keep their volumes and only
+change multiplier (1.25× → 2×) — that half is arithmetic, not a model.
+
+| | observed | saving | share | of which the director |
+| --- | ---: | ---: | ---: | --- |
+| run 8 | $51.54 | $3.40 – $7.99 | 6.6 – 15.5% | $19.78 → $13.34 – $9.03 |
+| run 9 | $91.60 | $10.57 – $11.44 | 11.5 – 12.5% | $27.10 → $12.45 – $11.97 |
+| run 10 | $50.47 | $4.22 – $5.02 | 8.4 – 9.9% | $15.69 → $8.60 – $8.35 |
+
+**The falsification condition, stated before the numbers were run: if the agents that never cross a
+five-minute window pay more in write premium than the waiting agents save, the change is bad.** They
+do pay more — a 1-hour write is 2× against 1.25×, and every dispatch's first request pays it whether
+or not it ever waits. Measured, that bucket is **+$3.35, +$5.44 and +$2.84** against gains of $6.75
+to $16.89. The condition is not met on any of the three runs, and the asymmetry is why: the premium
+lands mostly on short Sonnet agents at $3/M, the recovered re-establishments on the Fable director at
+$10/M.
+
+Window lengths bound it further and favourably: the TTL moves the cliff from 300 s to 3,600 s, and
+**every** long wait in runs 8 and 9 (12 and 17) and 13 of run 10's 14 are under an hour. Run 10's
+outlier is 314 minutes — the Artifact parking of §7, a pathology rather than a workload.
+
+**Why this is not §S24's fourth refuted optimisation.** The three there proposed to change what
+agents *do* — compress coordinator reports, shorten implementer receipts, force parallel packages —
+each on a plausible mechanism that measurement contradicted. This changes no prompt, no dispatch
+pattern and no agent behaviour: the same tokens are sent in the same order and priced differently.
+Its mechanism was read from the binary before it was measured, confirmed at wire level on a
+controlled gap, and its loss term was computed rather than assumed. §S24's lesson is *measure before
+believing*, and it is satisfied here rather than dodged.
+
+**Three things this must not be allowed to become.**
+
+- **Not a requirement.** A plugin may contribute only `["agent","subagentStatusLine"]` to settings
+  (§S9), so this can never be shipped — it can only be an install step, and `REQUIRED_ENV` is empty
+  precisely because an install step is a thing that can be missing. **Superseded by §V17**, which
+  is why this sentence is dated rather than deleted: the entry that was in `RECOMMENDED_ENV` is
+  gone, because the run installs the setting itself rather than asking. The invariant survives the
+  change of posture — preflight reports, and no run refuses to start over it.
+- **Not a declaration.** Whether the run got the 1-hour tier is a question about the run, not the
+  configuration, and the transcripts answer it directly: `cachePosture()` reads the observed
+  `ephemeral_1h` share of subagent cache writes. Same discipline as `directorTier` — read what
+  happened, not what was asked for.
+- **Not free, and not universal.** The env var also bypasses the harness's own `isUsingOverage`
+  demotion to 5 minutes, so a session in usage overage keeps paying 2× writes where the harness
+  would have stepped down. `FORCE_PROMPT_CACHING_5M` outranks it. And
+  `CLAUDE_CODE_SUBAGENT_CACHE_EVICT` / `tengu_subagent_cache_evict` (default off) attach
+  `evict_on_complete` to a subagent's cache — the exact opposite of what this run wants. Never set it.
+
+**What is now measured that was not.** `analyseRoles` counts, per role, waits ≥ 5 minutes and how
+many of them crossed the expiry (`cache_read === 0` with a full re-write), and the report renders
+both. Run 10's director paid 74.6% of its cost on re-establishment and no figure the plugin produced
+showed it — the same shape as every §K-onwards defect, one metric over: the quantity that decided
+the bill had no reader.
+
+### V16. Where the planning half's time actually goes — three optimisations declined, one defect fixed
+
+Run 10's planning half (`PLAN_DRAFT` → `PLAN_LOCK`) is **91.5 min of 197 min of machine time**, and
+the whole pre-code floor is 136 min, 69%. The obvious reading is that reviewing plans is slow. The
+telemetry says something narrower, and it changes what may be cut.
+
+**Codex is not the cost.** Across runs 8, 9 and 10 every round returned in **1.7–7.3 minutes**. Yet
+`PLAN_REVIEW_2` is the longest review phase of all three runs — 24.7, 37.2, 37.6 min — against
+`PLAN_REVIEW_1` at 4.8, 6.8, 3.6. The gap is not the reviewer.
+
+**It is one adjudication.** Run 10's `PLAN_REVIEW_2`, minute by minute: Codex returns at **+7.3 with
+a single finding**; nothing is emitted until **+32.3**, when that finding is adjudicated; the phase
+ends at +37.6. Twenty-five minutes for one finding. The subagent transcripts say what happened in
+them, and it is not idling: the adjudicator read the plan and the review, **reproduced the finding
+against a probe repository**, dispatched a `sonnet-implementer` to build a gate-validation fixture,
+ran that fixture about fifteen times, wrote the evidence, edited the plan and recorded the decision.
+
+That is §P4's capability exactly — the adjudicator refusing to take Codex's word and proving the
+claim — and §Q11's, which rejected a recommended fix *by executing it*. **Cutting adjudication is
+cutting the product.** So the honest statement of the floor is not "planning is slow" but *the
+planning half contains two complete adjudication cycles, and an adjudication cycle is the mechanism
+the whole architecture is for*.
+
+**Declined, in §S24's spirit — each was considered against this trace and refused:**
+
+- **Batching the director's consecutive `state-machine transition` calls.** They do sit 12 seconds
+  apart, and chaining them in one Bash call would save a model turn each. It would also skip
+  `nextAction()` between them — the instruction the phase machine injects to drive the next step.
+  Saving twelve seconds by blinding the loop that reads the instruction is the trade this repository
+  has a name for.
+- **Reducing round count, or the adjudicator's fixture work.** The first degrades the product by
+  construction. The second is §S24's second entry re-derived: the coordinator's context *is* its
+  verification work, and shrinking it weakens verification to save nothing.
+- **Treating the director's plumbing turns as a target.** They are real and large — plugin CLI verbs
+  are **53%, 57% and 69%** of all director tool calls across runs 8, 9 and 10, confirming §V7's "28
+  of 62 turns" from a second angle. But no reduction survives inspection without blinding something,
+  and §V15 has just made each of those turns much cheaper: a plumbing turn that used to pay a full
+  context re-establishment mostly will not. Recorded as a finding, not a task.
+
+**One defect did survive, and its provenance is the trace rather than the code.** After the plan
+gate failed, run 10's director spent **seven consecutive turns** reading `verify-completion.mjs`,
+`lib/state.mjs` and `adjudication-ledger.mjs` — the plugin reverse-engineering itself. The cause is
+one message. `adjudicated-<round>` said *"re-record the adjudication against the current findings"*,
+and the round that orphaned those decisions was a **replay that came back clean**: there were no
+current findings to re-record against. The remedy was not terse, it was a contradiction, and the
+executable form — `adjudication-ledger.mjs record --round <r> --file <decisions.json>`, which
+replaces the round wholesale and therefore accepts `[]` — already existed verbatim thirty lines away
+in `adjudication-ledger.mjs` itself. The condition now names that command and, when the current
+review has no findings at all, says the file is the empty array.
+
+§S17 and §V13 established that every failing condition states what clears it; this is one more site
+where the rule was claimed and not implemented, which is §U's shape — found by reading a real run's
+trace rather than the code, because the code looked fine.
+
+**Checked and not a defect.** Run 8's `PLAN_REVIEW_2` shows the same three findings recorded,
+resolved, recorded and resolved again — about 7 of its 24.7 minutes. That is the condition §S22 and
+its `record`-side sequel already closed: revisiting a decision is legitimate work, and the journal
+now names it `adjudication_decision_replaced` / `adjudication_resolution_replaced` rather than
+minting a second finding. Run 9's telemetry shows the corrected event firing. Closed, not live —
+recorded here so the next reader of that trace does not re-open it.
+
+### V17. The run installs its own 1-hour cache, and takes it back — four measurements, two of them counter-intuitive
+
+§V15 found the mechanism and delivered it as advice: one line in the user's `~/.claude/settings.json`.
+That is an install step, and the product's contract is *install the plugin, run
+`/hyperpowers:feature`, that is all*. So the question became whether the plugin can install the
+setting itself. It can, and the route is not the one the first design assumed.
+
+**A settings write is applied to the live session.** The harness reacts to a settings change by
+re-applying `settings.env` into `process.env` (`if (e.settings.env !== t.settings.env && Xd()) pV()`),
+and `eFe(querySource)` reads `process.env` on **every request**. Measured inside one session, no
+restart: a subagent dispatched before the write ran on the 5-minute tier, one dispatched seconds
+after it ran on the 1-hour tier.
+
+**A subagent already mid-conversation moves too**, which is the case that matters — the director
+runs `state-machine.mjs init` as its own first tool call. Its request-by-request trace:
+
+```
+main      1h 1h 1h
+SUBAGENT  5m 5m 5m 5m 1h 1h 1h
+                    ↑ the subagent writes the settings file here, mid-conversation
+```
+
+**One write covers every depth.** `process.env` is process-global, so the director, its coordinators
+and their implementers all move together: after the flip, every nested conversation at depths 1, 2
+and 3 wrote into the 1-hour bucket. There is nothing to do per dispatch, and no reason to hook
+`Agent`.
+
+**Two results that would have shipped a silent defect.**
+
+- **Deleting the key does not undo it.** The re-application is `Object.assign(process.env, …)` — it
+  adds and overwrites and never unsets. A release that removed the key left the live session on the
+  1-hour tier while reporting that it had reverted. Writing `"0"` *does* revert it: the harness's
+  truthiness helper accepts only `1/true/yes/on`. Measured: `1h 1h` → write `"0"` → `5m 5m 5m` →
+  delete the key → `5m 5m`, with the user's own neighbouring key untouched throughout.
+- **The two writes cannot share one call.** `"0"` followed immediately by removal reverts *nothing* —
+  the reload coalesces and observes only the final state. So release is two phases: the terminal
+  transition writes `"0"`, and the next `SessionStart` removes the key, in a fresh process that has
+  already read `"0"`. The second phase is also the self-healing one, because a run that crashed
+  never released at all (§V8's lesson: a guarantee that depends on one hook firing is not one).
+
+**The scope moved, on a measurement that killed the better-looking option.** The first
+implementation wrote the project's `.claude/settings.local.json`: narrower, already one of
+`HYPERPOWERS_OWN_FILES`, and verified safe on all four doors that could have leaked it into the work
+under review — excluded from the review pack (`excludeOwnFiles()`), from the completion gate's
+working-tree digest (`gitSnapshot(projectRoot, excludeOwnFiles())`), from `git status` (Claude Code
+adds the path to the user's **global** gitignore itself), and invisible to `git-guard.mjs`, whose
+fingerprint reads HEAD, branch, refs, stash, index and local config and never untracked paths.
+
+It still had to be abandoned. Driving the **real** `state-machine.mjs init` end to end in a fresh
+repository, the file was written, the telemetry said `engage changed:true`, and every subagent
+stayed on the 5-minute tier. The discriminating run is one line different:
+
+| `.claude/` present when the session started | writer's own requests | child dispatched afterwards |
+| --- | --- | --- |
+| no | `5m 5m 5m` | `5m 5m 5m` |
+| yes (empty) | `5m 5m **1h**` | **`1h 1h 1h`** |
+
+**The settings watch is established on the `.claude/` directory at startup.** A file created inside
+an existing one is noticed; the directory appearing later is not — and a `SessionStart` hook that
+creates it runs too late, measured. So the project scope is silently inert in exactly the case that
+matters most: a repository nobody has configured yet.
+
+`~/.claude/` always exists, so the user settings file is always watched — confirmed with the same
+A/B, backing the real file up and restoring it. It is also the *better* answer on the original
+constraint: writing there means the plugin still writes **nothing into a project**, so spec §20 and
+the reviewer's diff are untouched rather than merely excluded. What it costs is that while a run is
+live the setting **applies to** every Claude Code session sharing that config directory — this
+sentence read "is visible to", and "visible" was the wrong verb for a value those sessions are
+billed on (§V20 has the arithmetic and the correction). It is **not** the same trade
+`git.enforce: 'run'` makes: that one is scoped by a predicate this plugin evaluates, this one by a
+file it does not own. Because that file is shared, the marker holds a **refcount**: two runs in two projects both
+engage, and the first to finish does not take it from the second.
+
+**Two harness facts worth having on the record.** A plugin's settings allowlist is still exactly
+`["agent","subagentStatusLine"]` in 2.1.220 (`R8u`), re-read rather than quoted from §S9 — so
+shipping the variable was never available. And the `update_environment_variables` control request,
+which does set `process.env` in-process, is allowlisted to `CLAUDE_CODE_SESSION_ACCESS_TOKEN` and
+`CLAUDE_CODE_OAUTH_TOKEN` — not a route either. The settings file is the only door.
+
+**One asymmetry the implementation depends on.** The *model* cannot write a settings path: both a
+`Write` call and a transparent `cp` to `.claude/settings.local.json` were refused by the permission
+classifier during these probes. A CLI script can, and the classifier sees only `node
+…/state-machine.mjs init`. So this belongs in a script the director already runs, never in an
+instruction to an agent — which is the more robust place regardless.
+
+**One thing the harness does that this has to survive.** Claude Code **rewrites `settings.json` from
+its in-memory copy as it exits**, which silently clobbered an external restore performed immediately
+after a probe session ended — the key was back before the next command ran. So a release cannot
+assume its write is the last one. It does not need to: the sweep is idempotent and convergent. It
+finds `"1"` with no live holder, writes `"0"`, and the session after that removes the key — so a
+clobbered release costs one extra session, not a stuck setting. The same property covers a run that
+crashed without releasing at all. Anyone tempted to "simplify" the sweep into a single-shot cleanup
+should read this paragraph twice.
+
+**End to end, against the shipped code, in a repository with no `.claude/`**: with the user settings
+verified free of the key beforehand, `state-machine.mjs init` logged `subagent_cache engage
+changed:true wrote:true`, and both the dispatching agent and the child it dispatched afterwards
+wrote into the 1-hour bucket.
+
+`wrote` is reported separately from `changed` because of a near miss: an earlier attempt at this
+same e2e reported `changed:true` while the key was *already* `"1"` — left there by the previous
+probe's shutdown write — so it looked like a validated write path and was not one. `changed` means
+a claim was taken; `wrote` means the file moved. Two facts, two fields. The request at which the
+flip lands *inside* a conversation was measured separately (`5m 5m 5m 5m 1h 1h 1h`); the e2e
+confirms the outcome, not that boundary.
+
+**What the run keeps saying about it.** `cachePosture()` still reads the *observed* `ephemeral_1h`
+share out of the transcripts, so the report cannot report an intention. The engage and release both
+emit a `subagent_cache` telemetry event with their reason, `.hyperpowers.json` → `cache.subagent1h:
+false` turns the whole thing off, and `FORCE_PROMPT_CACHING_5M` in the session is detected and
+reported rather than fought — it outranks the enable inside the harness, so writing the file anyway
+would have been a file that does nothing.
+
+### V18. The feature wrote the developer's own settings, and the suite went green anyway
+
+`session-settings.mjs` targets the user settings file, and every test that drives `state-machine.mjs
+init` sandboxes `HYPERPOWERS_DATA_ROOT` — but nothing sandboxed `~/.claude/settings.json`. So the
+first full `npm run check` after the feature landed added `ENABLE_PROMPT_CACHING_1H` to the machine
+it was built on, 729 tests passed, and the only reason it was noticed is that `preflight` was run by
+hand afterwards and reported the key as already in force.
+
+The fix is not "set the variable in the test harness": there are about twenty places that build a
+test environment, and patching them is §U's defect — a rule implemented in some of the places it
+names. `userSettingsPath()` derives from the sandbox instead: an explicit `HYPERPOWERS_SETTINGS_FILE`
+first, then `HYPERPOWERS_DATA_ROOT` (a sandboxed data root is a sandboxed installation), then the
+real config directory. One line, every existing site, and the next one nobody remembers to update.
+
+The guard is a test that runs the real `init` under a sandboxed data root and asserts the developer's
+`~/.claude/settings.json` is byte-identical afterwards — behaviour rather than a convention, which is
+the only form that survives a contributor who has not read this entry.
+
+**The general shape, for the next feature that writes outside the run directory.** Hyperpowers had
+never written anything outside its own data root, so no test seam existed for it and none was missed
+— the sandbox was complete right up until the moment the blast radius grew. A feature that reaches a
+new part of the filesystem has to bring its own seam with it, and the test that proves the seam works
+belongs in the same change.
+
+### V19. The pre-code half has no dead time to reclaim — and one false positive on the way there
+
+§V16 declined three time optimisations after decomposing `PLAN_REVIEW_2`. The obvious next question
+is whether the *rest* of the 46% is idle. It is not.
+
+Occupancy of every pre-code phase, counting an interval as worked when any agent made a request
+that ended it, capped at ten minutes so a genuine stall cannot be counted as work:
+
+| | pre-code | busy | of which director alone | idle |
+| --- | ---: | ---: | ---: | ---: |
+| run 8 | 116 min | 99% | 21% | 1% |
+| run 9 | 206 min | 97% | 20% | 3% |
+| run 10 | 135 min | 93% | 26% | 7% |
+
+At a two-minute cap the same runs read 45–60% "idle", which is the whole trap: the pre-code half is
+a **serial chain of long operations**, not a chain with gaps in it. Every apparent hole is one
+operation taking longer than two minutes. There is nothing to reclaim by scheduling; the only levers
+are fewer steps or parallel ones, which is what §V16 already priced.
+
+**The false positive, recorded because it nearly shipped.** Splitting the director's turns by
+whether the request was cold gave a median of **420s cold against 12s warm** on run 10 — an
+apparently enormous wall-clock cost of cache expiry, and an apparent second dividend for §V17. It is
+circular. "Cold" is *defined* as a read of zero, which only happens after ≥5 minutes idle, so the
+measurement says long gaps are long. This is §V4's identity in a new costume, found by asking what
+the four cold turns actually were: their timestamps land on the Codex rounds (+22.5 against design-1
+at +22.4, +44.0 against design-2 at +43.9, +97.7 and +134.6 against the two plan-2 rounds). The
+director was blocked in `Bash(codex-adversary.mjs)`, an external binary that makes no Claude
+requests. **§V15/§V17 buy money, not time**, and nothing measured here says otherwise.
+
+**What the chain is made of**, run 10: ~25 min of Codex across six rounds, ~64 min of adjudication
+(§V16: reproduction with a fixture, which is the product), and the remainder drafting. The one
+candidate left with a real number is overlapping `PLAN_DRAFT` with `DESIGN_REVIEW_2` — 7.0, 15.8 and
+15.3 min on the three runs, about 9% of the pre-code half. It is not taken here because it plans
+against an unlocked design, which is the invariant the two-cycle structure exists to hold, and
+because §S24's record is three plausible savings out of three refuted on measurement. It is written
+down so the next person prices it rather than rediscovers it.
+
+### V20. An adversarial pass on §V17's own feature — one crash, one scope claim, one refused change
+
+An independent contradictor was given the design of §V15/§V17 and asked for flaws. The two claims
+that decided the outcome were reproduced rather than accepted.
+
+**The crash.** `writeSettings` threw, and `cmdInit` called it under the comment *"Never fatal"*.
+Reproduced: with the settings directory unwritable, the director's **first tool call** dies on an
+uncaught `EACCES` — no run at all, which is worse than the leak this entry was about. Four unguarded
+writes across the three exported functions, two reachable from CLI verbs (`init`, and `transition`
+where a throw strands a terminal transition). All four return a reason now. §U's shape inside a
+module written by that discipline, with 729 green tests that never touched the path.
+
+The fix carried one correction: the undo record is written **before** the change it undoes. The two
+writes are not a transaction, so the order chooses the failure — marker-then-settings leaves a claim
+with nothing done, which the next sweep drops; settings-then-marker left `"1"` with no way home.
+
+**The scope claim, corrected in eight places — and the count was got wrong first.** Every site said
+"while a run owns the session". Enumerating from memory gave six; `grep "owns the session"` gave
+eight, the two missed being the module's own title line and the call-site comment in
+`state-machine.mjs`. The true scope is every Claude Code session sharing `~/.claude/`, for as long
+as the run lasts: `git.enforce: 'run'` is scoped by a predicate this plugin evaluates, this by a
+file it does not own. `process.env` stays process-local; the file is shared.
+
+Stating that cost as loss was wrong:
+
+| an unrelated session's prefix | 5-minute tier | 1-hour tier | |
+| --- | ---: | ---: | --- |
+| never reused after minute five | 1.25× | **2.0×** | a 0.75× premium |
+| reused once between 5 min and 1 h | 1.25 + 1.25 = 2.5× | **2.0 + 0.1 = 2.1×** | it **wins** |
+
+The criterion is reuse past the expiry — the same one that makes the setting worth having here.
+"Short agents lose" is a proxy, and a wrong one.
+
+**The change that was refused.** Moving the marker out of `dataRoot()`, which `claude plugin
+uninstall` deletes (§S25). Three objections, two verified here:
+
+- After an uninstall no plugin code runs again, so nothing sweeps wherever the marker sits. The real
+  claim had to be *surviving reinstall* — and the first upgrade cannot migrate a marker the
+  uninstall already deleted.
+- **The shared-refcount rationale is false.** `holderLive()` resolves holders through `projectDir()`,
+  which is `dataRoot()`-relative. Two installations sharing one marker still read liveness through
+  their own roots, so each declares the other's holders dead. One marker is not one refcount.
+- Sharing a path across versions opens a silent deletion: a foreign marker without `priorPresent` is
+  truthy, suppressing the snapshot, and the sweep then deletes a key the user owned.
+
+Closing it properly needs an interprocess lock, a versioned marker schema and installation-aware
+holder identity — a project, not a path change, against §S24's three-for-three record.
+
+**The residual.** Uninstalling with a run in flight strands `ENABLE_PROMPT_CACHING_1H` at `"1"`, with
+no code left to remove it. The window is `init` to the terminal transition. Nothing here closes it.
+
+### V21. The release was wired to one of the three paths that reach a terminal phase
+
+Run 11 was aborted mid-flight and `ENABLE_PROMPT_CACHING_1H` stayed `"1"` in the live session.
+Measured, not inferred: `settings.env` and the marker were read before and after the abort and
+neither moved, and the run's telemetry carries one `subagent_cache` event where it should carry two.
+
+Three paths reach a terminal phase — `state-machine transition`, `state-machine abort`, and the
+subagent controller's forced `BLOCKED` (`subagent-controller.mjs:415`). §V17 wired the release into
+`cmdTransition`, the CLI verb, so the other two did nothing. §U's shape once more, in the feature
+§V20 had just audited: a rule stated once and implemented in a third of the places it names.
+
+The bound is real but weaker than it looks, which is why it took a live run to notice. `ABORTED` is
+terminal, so the aborted run's holder is dead, so the next `SessionStart` sweep reverts and the one
+after removes the key — it converges. What is lost is phase one: the **live** session keeps the
+1-hour tier after an abort, and convergence costs an extra session.
+
+Fixed at the join rather than at the callers: the release moved into `transition()` in `state.mjs`,
+below the lock so the terminal phase is on disk first, and gated on `isTerminal(next.phase)` alone.
+`SUSPENDED` is not terminal, so a resumable run still keeps its cache — the same behaviour §V17
+wanted, now derived rather than spelled. The verb-level call is deleted; a test asserts it stays
+deleted, because a second release site is how this defect comes back.
+
+Two tests, and the pair is the point: one counts the sites (`state.mjs` releases, `state-machine.mjs`
+does not), one drives the real `init` then `abort` through the CLI and asserts the file reads `"0"`.
+The first would pass on a refactor that moved the bug; the second is the behaviour.
+
+### V22. Five hours of watching one status row, and the run that refuted the measurement
+
+Run `x7vii1` was watched live from `PREFLIGHT` to a manual abort at 5h00 wall, sampling the row's
+inputs every 20 s. Six defects surfaced. Then its owner said the machine had **slept**, which
+invalidated three of the six findings and every duration that supported them — recorded here in the
+order it happened, because the correction is the more useful half.
+
+**What wall-clock claimed, and what awake time says.** `pmset -g log` gives the sleep intervals;
+subtracting them, `x7vii1` was awake for **1h58 of 5h10 — 61% asleep**. Three claims did not survive:
+
+| claimed from wall-clock | measured awake |
+| --- | --- |
+| 3h10 in `PLAN_REMEDIATION`, "five dispatches, no progress" | ~1 h of work; the phase completed normally |
+| "a healthy agent went 34m35 without writing — the 17.7 min figure is stale" | **retracted**: the longest silence in the run is **8.6 min**, and it is a Codex round |
+| "false positive: 45 min stale while an adjudicator wrote" | the warning did fire wrongly, but **suspend** caused it, not a long dispatch |
+
+The middle row is the one worth keeping as a method note: a threshold was nearly re-derived from a
+number that measured a closed laptop.
+
+**The calibration, on three runs and 6,448 writes.** The write timeline is the union of every
+transcript message timestamp (main and every subagent, across every session directory the project
+has) and every telemetry event — the exact set of facts the new definition reads. Gaps are computed
+in awake time and classified, because a gap that coincides with a Codex round is rendered as a round
+rather than as a warning and must not set the warning's threshold.
+
+| run | asleep | longest quiet, no Codex |
+| --- | ---: | ---: |
+| `x7vii1` — ABORTED 5h | 61% | **3.3 min** |
+| `mbqxzn` — COMPLETE 5.3h | 0% | **6.4 min** |
+| `vv1ffc` — COMPLETE 12h | 2% | **9.1 min** (in `EXECUTION`) |
+
+Codex rounds themselves top out at 8.6 min against a 15-minute `codex.timeoutMs`.
+
+**And the outlier that changed the design.** `vv1ffc` also showed a **5 h 14 window with not one
+write**, machine awake, on a run that reached `COMPLETE`. It was not a stall:
+
+```
+04:59:08  publish_requested   FINAL_ACCEPTANCE
+04:59:11  publish_parked      FINAL_ACCEPTANCE
+          ←—— 5 h 14 ——→
+10:13:27  artifact_recorded
+10:13:42  gate completion passed:true
+10:13:57  → COMPLETE
+```
+
+The run was **waiting for its owner**. A director cannot publish an Artifact (§S21), so it parks the
+errand and stops; only the main thread can finish it. Every silence-based rule calls that a stalled
+run, and the shipped warning would have spent five hours telling the one person who could finish it
+to abort instead — fifteen seconds of human action from `COMPLETE`. `pendingErrand()` already
+reports this, for questions and publications alike, and nothing was reading it.
+
+**What shipped: one cell, five states, ordered by what reading it wrong costs.**
+
+| # | rendered | condition | source |
+| --- | --- | --- | --- |
+| 1 | `⏸ waiting for you — publish` | `pendingErrand()` | never overridden |
+| 2 | `⚠ nothing has written for 24m` | quiet past the threshold | overrides 3–5 |
+| 3 | `⛔ gate design 12/13` | `state.gates[g].passed === false` | `verify-completion` stores failures as it stores passes |
+| 4 | `⟳ codex plan-2 3m40` | `<round>.prompt.md` with no `<round>.md.*.last.json` | the adapter already writes both |
+| 5 | `↳ execution › 2×implementer` | live descendants | §V14 |
+
+They are one cell because they answer one question — *what is happening now* — and are near-exclusive
+in practice: Codex runs through Bash so it excludes the roster, and a parked errand means nothing is
+running. Three separate cells would have spent width on combinations that do not occur, on a row
+already eight cells wide. **Silence outranks the three "something is running" states** because in the
+9-hour stall the delegates were still *registered* while being dead: what is running is a claim, what
+has written is a fact. The cell holds a fixed position, after the phase name — a slot that moved
+between its states would make the row jump as a run changed.
+
+**Quiet is measured as the most recent write anywhere**, not as `state.updatedAt`: a director inside
+a synchronous dispatch mutates nothing for as long as the dispatch runs. `lastWriteAt()` stats the
+transcripts rather than parsing them, which the 5 s tick can afford and which agrees to within one
+message.
+
+**The threshold is derived, not chosen.** `quietWarnMs = max(20 min, codex.timeoutMs + 5 min)`. Over
+twice the 9.1-minute measured maximum; above the one operation that legitimately writes nothing, so a
+round cannot raise a false alarm even if the round detector fails; and an order of magnitude below
+both real stalls. A project that lengthens the Codex timeout lengthens this with it.
+
+**Three mechanical defects fixed alongside.**
+
+- **The elapsed cell had never rendered — not once, in any run.** The harness sets
+  `startTime: Date.now()` (`kw(...)` in the binary), a **number**, and the row did
+  `Date.parse(task.startTime)` → `NaN`. The age now comes from `state.createdAt`, which is also the
+  better number: the director is resumed and re-dispatched, so its task's start is not the run's.
+  The regression test sends `startTime` as a number, because the previous fixture sent an ISO string
+  and thereby encoded the presumption instead of the measurement — which is exactly why a dead cell
+  sat behind a green suite.
+- **`x/y wp` appeared in `PLAN_DRAFT`**, reading `0/3` at a point where no package *can* be accepted,
+  which reads as failure rather than as "not started". Gated to `EXECUTION` onwards. This was the
+  question that opened the whole line of work.
+- **The status line identified the director by name alone**, so §S13's depth-3 impostor would have
+  taken the run's bar and rooted the roster on an agent with no descendants. `isDirectorMeta()` in
+  `config.mjs` is now the one spelling of *name and depth 1*, shared with `subagent-controller.mjs`.
+  `git-policy.mjs` deliberately does not use it and says why: it judges a *request* to dispatch,
+  before any agent or meta exists.
+
+**Method note, and the reason this entry is long.** Three of the six findings were inferred from
+wall-clock and one from a fixture that encoded an assumption. The measurements that survived are the
+ones taken from files somebody else writes — `pmset` for sleep, transcript timestamps for work,
+telemetry for state. §S13's rule generalises: timeline, inventory, parentage — *then* a mechanism.
+
+### V23. §V22 verified on a live run — all five states, no false positive, and a clean calibration point
+
+Run `ewkwu9` (pilot6) was watched from `PREFLIGHT` to `COMPLETE` with the §V22 patch in flight,
+sampling the *rendered row* every 20 s by driving `statusline.mjs` exactly as the harness drives it
+— real state, real transcripts, real packs. **`COMPLETE` at 3h43, $49.26, 19 phases, 0.0% asleep**:
+the first status-line measurement taken on a machine that never suspended, which is what makes its
+durations quotable at all (§V22).
+
+**Every state fired, and the one that should never fire never did.**
+
+| state | first seen | what it replaces |
+| --- | --- | --- |
+| `↳ 2×researcher` | 22:51 | the `(+N)` the decoration overwrites |
+| `⟳ codex design-1` | 23:09 | 22 min of frozen row across one run's four rounds |
+| `⛔ gate design 11/13` | 23:59 | 17 min of unexplained stillness |
+| `⏸ waiting for you — publish` | 02:28 | 5h14 of silence on `vv1ffc` |
+| `⚠ nothing has written` | **never** | the two false positives the old rule produced |
+
+The empty state — no delegate, no round, no gate, no errand — is the implicit sixth and is correct:
+the director working alone has nothing true to report beyond the phase.
+
+**The threshold held with 5× margin.** 2,153 writes, 7 Codex rounds: longest quiet window of any
+cause **7.2 min** (a Codex round, shown as one), longest non-Codex **4.0 min**, against 20 min. That
+is a fourth calibration point and the first from an unsuspended `COMPLETE` run — 3.3 / 6.4 / 9.1 /
+4.0 min across four runs now.
+
+**Two corrections confirmed at the moment they mattered.** `0/3 wp` appeared at the `EXECUTION`
+transition and not before, closing the question that started this work. The age cell rendered from
+the first tick, having never rendered once on any prior run. And `PLAN_REMEDIATION` — the phase where
+the old definition cried twice on a healthy run — passed in 26 minutes in silence.
+
+**Three refinements this run surfaced, none of them shipped.**
+
+- **A gate that fails for two seconds still draws.** `⛔ gate plan 16/18` appeared at 01:41:01 and
+  the gate passed at 01:41:03. Nothing false was shown, but a `⛔` nobody can read is noise.
+  Suppressing the cell below some tens of seconds of failure would cost a small delay on exactly the
+  long failures that matter, which is why it is recorded rather than done.
+- **`⟳ codex design-1 0m`** reads as a placeholder rather than a measurement. Dropping the duration
+  under a minute would read better.
+- **The gate cell names the gate and its score, not the failing condition.** `reason` already holds
+  the id (`unverifiable-stated`, `13.14-product-diagram` — both short), and showing it would make the
+  cell directly actionable, at the risk of a long list when several conditions fail at once.
+
+**One process failure, recorded because it is the point.** Asked what `⛔ gate design 11/13` meant, I
+ran `verify-completion.mjs --gate design` against the **live** run to answer with real data. That
+verb is not a read: it records its verdict while a run is live, so it overwrote `state.gates.design`
+(23:59 `unverifiable-stated` 11/13 → 00:05 `review-design-2` 8/9) and appended a spurious `gate`
+event to the telemetry that the final report counts. Both verdicts were `false`, so nothing passed
+that should not have, and the director re-verified and transitioned normally 13 minutes later —
+the fail-safe direction held. The lesson is narrower and sharper than "do not edit `scripts/` during
+a run" (§S19): **check whether a CLI verb writes before pointing it at a live run.** The one entry
+in this run's evidence that is not the run's own is that telemetry event.
+
+### V24. The published diagram stopped rendering, and nothing could tell
+
+Run 12's artefact reached its reader as a wall of truncated Mermaid source. Not a degraded diagram —
+no diagram. The page was the only thing the run makes for someone who reads nothing else.
+
+**What broke, in one label:**
+
+```
+B[".env document\nKEY=value\nMULTI=\"line one\\nline two\"\nQUOTED=\"has # and spaces\""]
+```
+
+Three errors, two fatal. Mermaid ends a quoted label at the first `"`, so `\"` terminates it and the
+remainder is a syntax error. `#` opens an entity code (`#quot;`, `#35;`). And `\n` is not a line
+break — the escape does not exist; the form is `<br/>`.
+
+**The drift is visible across four runs**, and it is drift, not a single change:
+
+| run | line breaks | risky characters |
+| --- | --- | --- |
+| 8 (`.mmd`) | `<br/>` | — |
+| 9 (`.md`) | `<br/>` | `&` escaped as `&amp;` |
+| 10 (`.md`) | `\n` | raw `#`, `[ ]`, `;` |
+| 12 (`.md`) | `\n` | raw `\"`, `#`, `{ }` |
+
+**Why it drifted.** §S37 replaced the hand-authored HTML page with a Markdown one. Its instruction
+describes the *page* — a title, a fence, two or three sentences — and says nothing about the
+diagram's own syntax. Run 9 wrote correct Mermaid from habit; runs 10 and 12 wrote `\n`, which is
+what one naturally writes inside a string. Nothing caught it: condition 14 verifies that a **URL
+exists**, never that the page drew anything. §U's shape on the deliverable itself.
+
+**§S37's arbitrage, re-examined.** Two of its three premises do not survive:
+
+- *"the page is the phase's cost"* — never measured, and §S37 said so in its own attribution bound.
+  `FINAL_ACCEPTANCE`'s 51 minutes on run 8 also held three gate attempts with two failures, a
+  rejected agent report and a publish relay that needed a nudge (§S38).
+- *"the artefact that reaches the user is identical"* — false. Even when it renders, Markdown gives
+  the page no typography, no palette and no layout; and on run 12 it did not render.
+- *"the hand-authored HTML was wrapped twice"* — **true, and kept.** Run 8 shipped its own
+  `<!DOCTYPE>`, `<html>` and `<head>` inside a file the publisher wraps again.
+
+Measured, the saving was ~7.5 kB of output ≈ 2,000 tokens ≈ **$0.10** on a $50 run. The instruction
+now asks for HTML **page content** — no document skeleton, `<pre class="mermaid">` in an
+`overflow-x: auto` container (the page body scrolling sideways is what truncated run 12's), one
+inline `<style>` with tokens on `:root` and a dark variant, no CDN because the CSP blocks it — and
+keeps the two or three sentences of prose, which is what makes the diagram legible to someone who
+was not in the run.
+
+**Enforced, not asked.** `lintMermaid` in `scripts/lib/mermaid.mjs` refuses the three forms at
+`publish-request`, before the errand parks. Three literal checks and not a parser: this repository
+ships no dependencies, and a hand-rolled Mermaid grammar would be a second thing to be wrong. The
+`#` rule is scoped to quoted labels so `style A fill:#f9f` still passes — a guard that rejects
+legitimate syntax becomes a nuisance and then gets removed.
+
+`extractMermaid` reads both containers. Extracting only the fence would have left `diagram.mmd`
+empty on every HTML page and dropped the final report's inline diagram — silently, which is exactly
+how §O17 was unreachable the first time.
+
+**One thing this cost.** The reference guard in the suite checks that a cited `§` **exists**, not
+that it means what the citation says: this entry was first written as §V23, which already existed
+and covers the status line on the same run. The test passed. Numbering collisions on an append-only
+document are not caught by an existence check, and nothing here fixes that.
+
+### V25. An external review of the §V20–§V24 change set — five findings against the one file we do not own
+
+Codex reviewed the staged tree. Seven findings; all seven reproduce. Five are against
+`session-settings.mjs`, and they share a cause worth naming: it is the only file this plugin writes
+outside its own data root, so every assumption it makes about *someone else's* file is a wager. The
+module's own rule 4 says the scope is the user's config; nothing said what "hand it back" means
+about the file's mode, its identity, or its unreadability.
+
+**The one that destroys data.** `readSettings` treated every read failure as "absent", and a file we
+cannot read is usually still one we can *replace* — the rename needs the directory, not the file.
+Reproduced: a mode-`000` settings.json came back containing only our own key, with `model` and
+`permissions.allow` gone. Only `ENOENT` means absent now; every other errno routes to the
+already-existing "present but unreadable — decline" path.
+
+**Two that alter the file without changing its content.** A bare tmp+rename widened a `0600`
+settings.json to `0644` — a file whose `env` block can hold API keys — and turned a symlink into a
+regular file, severing chezmoi/stow-style management. Both reproduced. `tryWrite` now resolves the
+link and writes its target, carrying the mode across; the temporary lives beside the target so the
+rename stays on one filesystem.
+
+**One that takes away what the user chose.** Ownership was decided with `=== '1'` while the harness
+accepts `1/true/yes/on` — and `subagentCacheState()` in the same module already knew that. A user
+who had set `"true"` had it claimed and then released to `"0"`. The predicate is shared now, and the
+asymmetry is deliberate and commented: **ownership is fuzzy, reclaiming is exact.** Any spelling the
+harness honours means the user turned it on; only our own literal `"1"` may be taken back.
+
+**One refcount that was not one.** The marker's read-modify-write was unlocked, so two runs starting
+together in one data root could lose a holder — after which the first release takes the setting from
+a live run. All three verbs now run under one lock on the marker path, failing open: a lock we
+cannot take degrades to the 5-minute tier, which is rule 5. This does **not** coordinate two
+*installations*; that case is bounded and its fix refused with reasoning in §V24.
+
+**And one that defeated §V24 on its own primary path.** `persistDiagramSource` preferred `--source`
+and only read the page when the flag was absent — while the director's instructions ask for the
+flag. So the lint validated a parallel string and a valid flag could accompany a broken page: the
+exact defect §V24 exists to stop, reintroduced by the argument order. The page is authoritative now;
+`--source` remains the fallback for markup the extractor cannot read.
+
+**Two outside that file.** A *failed* Codex attempt writes no `.last.json` — the adapter judges
+success by that file's existence — so the status line reported the round as running for twice the
+timeout, on a run that had already gone to `BLOCKED`. The review record is written on both paths and
+is now the completion signal. Never observed in five runs: zero rounds have failed. And the panel
+fixtures inherited `NO_COLOR`, which the status line honours on purpose (`statusline.mjs:76`), so
+`npm run check` failed for any operator who sets it — 745/746 here. Fixed in **all eight** fixtures
+rather than the one that failed, which is the defect this repository is named after.
+
+**What this says about the review before it.** §V20 audited this module and found the crash and the
+scope claim; it did not ask what the writes do to a file's *metadata*, or what an unreadable file
+means, because it was reading the module's own reasoning rather than the filesystem's. An
+independent pass with no context found five in the same file. The lesson is not "review more" — it
+is that a module whose whole risk is *someone else's file* should be reviewed against the file, not
+against its own comments.

@@ -279,12 +279,16 @@ export const PHASES = Object.freeze({
       '--gate completion`. It enforces the fourteen conditions of spec §13 mechanically. ' +
       'Read only the summary it prints — need, criteria and their status, tests, open ' +
       'findings, residual risks, Opus recommendation, Codex verdict. For the product Mermaid ' +
-      'diagram (condition 14): write a short **Markdown** page — a title, a ```mermaid fence, two ' +
-      'or three sentences of what it means — into your run directory, and hand it to the main ' +
-      'thread with `state-machine.mjs publish-request --run <RUN_ID> --file <path> --title ' +
-      '"<what it shows>" --source "<mermaid>"`, then stop. Artifacts render Mermaid natively and ' +
-      'wrap the file in their own document skeleton, so hand-authored HTML is work nobody asked ' +
-      'for. **Do not call `Artifact` yourself** — a subagent\'s ' +
+      'diagram (condition 14): write a small, well-set **HTML** page — a title, the diagram, two ' +
+      'or three sentences of what it means for the user — into your run directory, and hand it to ' +
+      'the main thread with `state-machine.mjs publish-request --run <RUN_ID> --file <path> ' +
+      '--title "<what it shows>" --source "<mermaid>"`, then stop. Page **content** only: the ' +
+      'publisher supplies `<!DOCTYPE>`, `<html>` and `<head>`, so writing them yourself gets the ' +
+      'page wrapped twice. The diagram goes in `<pre class="mermaid">` inside a container with ' +
+      '`overflow-x: auto`; one inline `<style>` with tokens on `:root` and a dark variant; no ' +
+      'CDN, the CSP blocks it. In labels use `<br/>` (never `\\n`), `#quot;` for a quote and ' +
+      '`#35;` for a hash — those three are refused mechanically because they stop the diagram ' +
+      'rendering at all (§V24). **Do not call `Artifact` yourself** — a subagent\'s ' +
       'publication returns a URL that never opens on anybody\'s screen, so the run would finish ' +
       'with a diagram the user never saw. You are resumed once the URL is recorded. Then ' +
       '*generate* the report with ' +

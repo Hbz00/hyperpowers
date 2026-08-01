@@ -133,6 +133,21 @@ variant, the user's `.hyperpowers.json`); the review pack and the scope check bo
 a round-5 reviewer once spent a mandatory round raising a blocking finding against the plugin's own
 output. `misplacedOrchestrationFile()` guards every CLI verb that takes a path from an agent.
 
+**The one file it writes is outside every project — and outside this run.** `session-settings.mjs`
+puts `ENABLE_PROMPT_CACHING_1H` into the *user* settings at `init` and reverts it at the terminal
+transition — a subagent's prompt cache expires in five minutes against the main thread's hour, which
+is 7–13% of a run (§V15). Three measured constraints hold it together, each of which looks like
+over-engineering until you read §V17: release writes `"0"` because **deleting never unsets**, its two
+writes **cannot share one call** because the reload coalesces, and the project scope is **inert in a
+repository with no `.claude/`** because the watch is established on that directory at startup.
+
+Two things §V20 added. **The scope is a file, not a run** — `git.enforce: 'run'` is scoped by a
+predicate this plugin evaluates, this by `~/.claude/settings.json`, so it reaches every session
+sharing that directory. Eight sites said "the session"; counting from memory found six and `grep`
+found eight, one being the module's own title line. And **these functions must never throw**: two
+are called from CLI verbs, and an unwritable `~/.claude/` killed the director's first tool call
+under a comment reading "Never fatal".
+
 `scripts/statusline.mjs` belongs to neither column: the root `settings.json` runs it per live
 subagent on a 5 s tick, and it is the only surface a plugin can draw on. The bar itself is computed
 elsewhere — `scripts/lib/progress.mjs` derives it from facts the machine already proves (gates,
@@ -149,6 +164,17 @@ so an agent nested under a live director can never be a row of its own. The rost
 running, `subagents/` is never pruned, and `spawnDepth`/`parentAgentId` are not serialised into the
 payload. Widths are fitted on plain text with an explicit drop rank before colour is applied — the
 idle warning silently ate the progress bar until it was (§V14).
+
+One cell answers *what is happening now*, in five states ordered by what reading it wrong costs
+(§V22): a parked errand, then silence, then a failing gate, a Codex round, the roster. **A parked
+errand is never overridden** — a run sat 5h14 waiting for an Artifact publication and then completed,
+and a warning saying "abort" would have destroyed it. **Silence outranks the three "something is
+running" states**, because in the 9-hour stall the delegates were still registered while being dead:
+what is running is a claim, what has written is a fact. So quiet is the most recent write *anywhere*
+(`lastWriteAt`), never `state.updatedAt`, which a director inside a synchronous dispatch does not
+touch for hours. Its threshold is derived — `quietWarnMs()` — not picked: **anything measured from
+wall-clock here is worthless**, since the machine sleeps and a suspended laptop is indistinguishable
+from a stall after the fact. Subtract `pmset -g log` before quoting a duration.
 
 ### Fail direction is per hook and deliberate
 
@@ -309,8 +335,11 @@ re-measured in §V4–§V7 and two of them came back narrower than they had been
   collapsed them: **cache read** is re-reading what you carry, **cache write** is re-establishing a
   cache that expired, and on the two most recent runs the write term is the larger (46.9% and 42.3%
   against 26.5% and 34.1%). Carrying less context addresses the first; crossing fewer expiry
-  windows, or crossing them at a cheaper tier, addresses the second. A subagent's cache expires at
-  ~5 minutes and nothing can change that (§T2).
+  windows addresses the second — **and the expiry itself turned out to be addressable**. §T2 called
+  the ~5-minute subagent cache a harness property nobody can remove; it is a *query-source
+  allowlist* that no `agent:custom:*` is on, and the run now installs its way past it (§V15, §V17).
+  Worth 7–13% of a run, with the 2× write premium on agents too short ever to wait counted against
+  it rather than netted out. The report measures which tier a run actually got.
 - **Batching independent tool calls is right, and its old sizing was not.** "Tool calls per turn was
   1.00" divided content blocks by tool-bearing transcript rows, and a row never carries two
   `tool_use` blocks — so 1.00 was an identity, not an observation (§V4). Per API request the same

@@ -392,7 +392,22 @@ export function subagentMeta(transcriptPath, agentId) {
 }
 
 /**
- * Cost by **role**, with the cost-term split — derived from the transcripts on demand.
+ * A wait long enough to have crossed a subagent's prompt-cache expiry, and what a crossing costs.
+ *
+ * The expiry is ~5 minutes (§T2) and the mechanism is now read rather than inferred: Claude Code
+ * asks for a 1-hour `cache_control` TTL only for query sources on an allowlist — `repl_main_thread*`,
+ * `sdk`, `auto_mode`, `memdir_relevance` — and a dispatched subagent's query source is
+ * `agent:custom:<type>`, which is on none of them (§V15). So the main thread holds context across
+ * an hour and every subagent loses it after five minutes, in the same session, at the same instant.
+ *
+ * `COLD_WRITE_FLOOR` keeps a trivial re-write from counting as a re-establishment: the signature of
+ * a real one is a gap past the expiry, a read of *exactly* zero, and a write of the whole prompt.
+ */
+const COLD_GAP_MS = 5 * 60 * 1000;
+const COLD_WRITE_FLOOR = 10_000;
+
+/**
+ * Cost by **role**, with the cost-term split and the wait counters — derived from the transcripts.
  *
  * The tier bands answer "did the pyramid hold?", and measurement showed that question addresses
  * about a quarter of the bill: output tokens are 24–27% of cost, and the largest line of the last
@@ -402,33 +417,40 @@ export function subagentMeta(transcriptPath, agentId) {
  * input), because the remedy differs: "re-read" wants less carried context, "re-write after a
  * cache expiry" wants fewer windows or a cheaper tier, and they were being summed under one word.
  *
- * Derived, never stamped: one pass over the same files `analyseTranscript` reads, attributed by
- * each subagent's meta `agentType` (the main thread is its own row). Requests are deduplicated by
- * requestId within each file, the same rule §P7 established.
+ * `longWaits` and `coldWindows` are here rather than in a reader of their own because they are the
+ * same pass over the same files under the same §P7 grouping, and a second walk would be a second
+ * place to fix. They are what makes the cache-TTL question falsifiable on a later run: run 10's
+ * director paid 74.6% of its cost re-establishing context across 14 long waits, and no figure the
+ * plugin produced would have shown that.
+ *
+ * Derived, never stamped: attributed by each subagent's meta `agentType` (the main thread is its
+ * own row), requests deduplicated by requestId within each file.
  */
 export function analyseRoles(transcriptPath, { since = null } = {}) {
   const cutoff = since ? Date.parse(since) : null;
   const roles = new Map();
-  const add = (role, file) => {
+  const add = (role, isSubagent) => {
     if (!roles.has(role)) {
       roles.set(role, {
-        role, dispatches: 0, messages: 0, outputTokens: 0,
+        role, isSubagent, dispatches: 0, messages: 0, outputTokens: 0,
         generationUsd: 0, cacheWriteUsd: 0, cacheReadUsd: 0, freshInputUsd: 0, costUsd: 0,
+        longWaits: 0, coldWindows: 0, coldWriteTokens: 0,
+        cacheWriteTokens: 0, cacheWrite1hTokens: 0,
       });
     }
     const r = roles.get(role);
-    if (file) r.dispatches += 1;
+    r.dispatches += 1;
     return r;
   };
 
-  const tally = (file, role) => {
+  const tally = (file, role, isSubagent) => {
     let text;
     try {
       text = fs.readFileSync(file, 'utf8');
     } catch {
       return;
     }
-    const bucket = add(role, true);
+    const bucket = add(role, isSubagent);
     // Same request rule as `analyseTranscript` (§P7): one entry per requestId, first row's usage,
     // except output tokens which take the max across the request's rows — the final row of a
     // streamed request carries the full count.
@@ -444,35 +466,82 @@ export function analyseRoles(transcriptPath, { since = null } = {}) {
       const msg = row?.message;
       const u = msg?.usage;
       if (row?.type !== 'assistant' || !u) continue;
-      if (cutoff && Number.isFinite(Date.parse(row.timestamp ?? '')) && Date.parse(row.timestamp) < cutoff) continue;
+      const at = Date.parse(row.timestamp ?? '');
+      if (cutoff && Number.isFinite(at) && at < cutoff) continue;
       const key = msg.requestId ?? row.requestId ?? `${file}:${requests.size}`;
       const prior = requests.get(key);
       if (prior) {
         prior.out = Math.max(prior.out, u.output_tokens ?? 0);
         continue;
       }
-      requests.set(key, { model: msg.model, u, out: u.output_tokens ?? 0 });
+      requests.set(key, { model: msg.model, u, out: u.output_tokens ?? 0, at });
     }
-    for (const { model, u, out } of requests.values()) {
+
+    // Waits are gaps *inside one dispatch*, so they are counted here and summed into the role —
+    // the boundary between two dispatches of the same role is not a wait, it is two conversations.
+    const ordered = [...requests.values()].sort((a, b) => (a.at || 0) - (b.at || 0));
+    for (const [i, { model, u, out, at }] of ordered.entries()) {
       const p = FAMILY_PRICING[familyOf(model)] ?? FAMILY_PRICING.unknown;
+      const write = u.cache_creation_input_tokens ?? 0;
+      const write1h = u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
       bucket.messages += 1;
       bucket.outputTokens += out;
+      bucket.cacheWriteTokens += write;
+      bucket.cacheWrite1hTokens += write1h;
       bucket.generationUsd += (out / 1e6) * p.output;
       bucket.cacheReadUsd += ((u.cache_read_input_tokens ?? 0) * CACHE_READ_MULTIPLIER / 1e6) * p.input;
-      bucket.cacheWriteUsd += (((u.cache_creation_input_tokens ?? 0) * CACHE_WRITE_MULTIPLIER
-        + (u.cache_creation?.ephemeral_1h_input_tokens ?? 0) * CACHE_WRITE_1H_PREMIUM) / 1e6) * p.input;
+      bucket.cacheWriteUsd += ((write * CACHE_WRITE_MULTIPLIER + write1h * CACHE_WRITE_1H_PREMIUM) / 1e6) * p.input;
       bucket.freshInputUsd += ((u.input_tokens ?? 0) / 1e6) * p.input;
+
+      const prevAt = i > 0 ? ordered[i - 1].at : null;
+      if (!Number.isFinite(at) || !Number.isFinite(prevAt) || at - prevAt < COLD_GAP_MS) continue;
+      bucket.longWaits += 1;
+      // A wait that cost nothing is still a wait; only a zero read *with* a full re-write is a
+      // re-establishment. Keeping the two counters apart is what lets a later run show the TTL
+      // change worked: the waits stay, the cold windows go.
+      if ((u.cache_read_input_tokens ?? 0) === 0 && write > COLD_WRITE_FLOOR) {
+        bucket.coldWindows += 1;
+        bucket.coldWriteTokens += write;
+      }
     }
     bucket.costUsd = bucket.generationUsd + bucket.cacheWriteUsd + bucket.cacheReadUsd + bucket.freshInputUsd;
   };
 
-  tally(transcriptPath, 'main-thread');
+  tally(transcriptPath, 'main-thread', false);
   for (const file of subagentTranscripts(transcriptPath)) {
     const id = path.basename(file).replace(/^agent-/, '').replace(/\.jsonl$/, '');
     const meta = readJsonQuiet(path.join(subagentsDir(transcriptPath), `agent-${id}.meta.json`));
-    tally(file, bareAgentName(meta?.agentType) || 'unknown-agent');
+    tally(file, bareAgentName(meta?.agentType) || 'unknown-agent', true);
   }
   return [...roles.values()].sort((x, y) => y.costUsd - x.costUsd);
+}
+
+/**
+ * Which prompt-cache TTL the **subagents** actually ran on, and what the expiries cost.
+ *
+ * Read rather than declared, for the reason `directorTier` is: `ENABLE_PROMPT_CACHING_1H` is a
+ * session-level setting this plugin cannot install (§S9 — the settings allowlist a plugin may
+ * contribute to is exactly `["agent","subagentStatusLine"]`), so whether it was in force is a
+ * question about the run, not about the configuration. The transcripts answer it directly: the
+ * harness records `cache_creation.ephemeral_1h_input_tokens` beside the write total, so a run
+ * where subagents wrote into the 1-hour bucket says so in its own numbers.
+ *
+ * Reports, never gates. A run on the 5-minute default is more expensive and completely correct.
+ */
+export function cachePosture(roles) {
+  const subagents = roles.filter((r) => r.isSubagent);
+  const write = subagents.reduce((s, r) => s + r.cacheWriteTokens, 0);
+  const write1h = subagents.reduce((s, r) => s + r.cacheWrite1hTokens, 0);
+  const share = write > 0 ? write1h / write : null;
+  return {
+    ttl: share === null ? 'unknown' : share >= 0.99 ? '1h' : share <= 0.01 ? '5m' : 'mixed',
+    share,
+    writeTokens: write,
+    write1hTokens: write1h,
+    longWaits: subagents.reduce((s, r) => s + r.longWaits, 0),
+    coldWindows: subagents.reduce((s, r) => s + r.coldWindows, 0),
+    coldWriteTokens: subagents.reduce((s, r) => s + r.coldWriteTokens, 0),
+  };
 }
 
 function readJsonQuiet(file) {
@@ -481,6 +550,35 @@ function readJsonQuiet(file) {
   } catch {
     return null;
   }
+}
+
+/**
+ * When any of these agents last wrote to its transcript, in epoch ms — or `null` if none has.
+ *
+ * The one fact that distinguishes a director *waiting* from a run that has stopped. `state.updatedAt`
+ * cannot do it: a director inside a synchronous dispatch mutates nothing for as long as the dispatch
+ * takes, so a status line keyed on it warned that a healthy run "may be wedged" and told its owner to
+ * abort (§V22). A delegate that is genuinely working writes messages, and the harness stamps the file
+ * as it does.
+ *
+ * `mtime`, not the last message's timestamp: this runs on a 5 s tick and parsing every transcript
+ * would cost far more than a `stat`. The two agree to within one write.
+ *
+ * Unreadable files are skipped rather than counted as silence — the fail-open direction here is
+ * "assume something is alive", because the cost of a wrong warning is somebody aborting a live run.
+ */
+export function lastWriteAt(transcriptPath, agentIds) {
+  if (!transcriptPath || !Array.isArray(agentIds) || !agentIds.length) return null;
+  const dir = subagentsDir(transcriptPath);
+  let newest = null;
+  for (const id of agentIds) {
+    if (!id) continue;
+    try {
+      const { mtimeMs } = fs.statSync(path.join(dir, `agent-${id}.jsonl`));
+      if (newest === null || mtimeMs > newest) newest = mtimeMs;
+    } catch { /* an agent whose transcript we cannot read proves nothing either way */ }
+  }
+  return newest;
 }
 
 /**

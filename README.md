@@ -53,15 +53,10 @@ really ran on the model it thought it did.
 detection and circuit breakers. A run that cannot proceed stops in `BLOCKED` with a
 reason — a better outcome than a confident `COMPLETE` on unproven work.
 
-**And one brake it does not have, stated plainly.** Stall detection and the delegate registry are
-sampled when the director finishes a turn. A director stuck *inside* a delegate it dispatched never
-finishes one, so nothing samples — and no plugin can cancel an agent call already in flight. One run
-sat that way for nine hours before it was aborted by hand (ledger §V8). That is **detected, not
-recovered**: a run's idle time is derived from its own state file, and the status line — the one
-surface that keeps ticking while an agent is stuck — is where it surfaces. The remedy is yours:
-`/hyperpowers:abort`, or stopping the stuck agent from your session. Nothing in the plugin can
-cancel an agent call already in flight, and saying so is more useful than a brake that does not
-exist.
+**And one brake it does not have, stated plainly.** No plugin can cancel an agent call already in
+flight, so a run can get stuck inside one — nine hours, once (ledger §V8). It is **detected, not
+recovered**: the status line says so when nothing has written for twenty minutes. The remedy is
+yours, `/hyperpowers:abort`.
 
 ## What it will not do
 
@@ -75,6 +70,14 @@ exist.
 
 Hyperpowers has its own escalation ladder, so a second advisor would arbitrate outside the run's
 ledger. It is **not required** and nothing installs it — preflight mentions it and moves on.
+
+While a run is active it puts subagents on the 1-hour prompt cache Claude Code already gives the
+main thread — one variable added to `~/.claude/settings.json` at the start and removed at the end,
+worth 7–13% of a run. Nothing is written into your project. Because that file is your user config,
+the setting applies to **every Claude Code session sharing it** while the run lasts, not only the
+one running the feature; for a session whose context is never reused after five minutes that is a
+2× cache-write premium instead of 1.25×. `{"cache": {"subagent1h": false}}` in `.hyperpowers.json`
+turns it off.
 
 ## When not to use it
 
@@ -134,19 +137,13 @@ All state lives in `$CLAUDE_PLUGIN_DATA`, so a run survives compaction, session 
 The agent panel gets one line, every five seconds:
 
 ```
-HP·director ███████░░░░░░░░░░░░░░░░░  30%  PLAN_DRAFT  0/3 wp  54m  $8.41  ↳ plan › 2×implementer
+HP·director ███████░░░░░░░░░░░░░░░░░  30%  EXECUTION  ↳ execution › 2×implementer  1/3 wp  54m  $8.41
 ```
 
-The bar is a walk over milestones the state machine already proves — stored review rounds, passed
-gates, and `x/y wp`, the work packages **accepted** (an implementer's own report cannot claim that).
-It is not a clock, and it never goes backwards: a remediation adds work rather than undoing it, so
-the fill holds and a retreat shows as `↻n`. `↳` is what is running underneath the director, by
-level; the panel cannot give those agents rows of their own while their parent is alive, and press
-`←` to see them individually. If the run stops mutating anything for half an hour the row says so,
-which is the detection half of the brake it does not have.
-
-Narrow terminals shed the roster first and the bar last. Nothing outside your run is decorated, and
-a session with no run is not decorated at all.
+Milestones, not a clock, and it never goes backwards — `↻n` counts the times the run went back.
+`x/y wp` is work packages **accepted**, which an implementer cannot claim for itself. `↳` is what is
+running underneath; press `←` for their own rows. That same cell tells you when a gate is failing, a
+review is running, the run needs you, or nothing has written for twenty minutes.
 
 `COMPLETE` leaves you three things: the diff in your working tree, uncommitted; a generated report
 with every acceptance criterion, its evidence, the six review rounds and the measured per-tier

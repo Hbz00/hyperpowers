@@ -18,6 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { parseArgs, emitJson, resolveProjectRoot, resolveRunId } from './lib/cli.mjs';
 import { dataRoot, isDataRootFromHarness, describeDataRoot, dataRootAgreesWithHooks, dataRootIsAmbiguous, artifacts, PLUGIN_ROOT } from './lib/paths.mjs';
 import { REQUIRED_ENV, RECOMMENDED_ENV, loadConfig, DIRECTOR_AGENT } from './lib/config.mjs';
+import { subagentCacheState, cacheEnabled } from './lib/session-settings.mjs';
 import { directorTier } from './lib/transcript.mjs';
 import { tryLoadState, mutateState } from './lib/state.mjs';
 import { logEvent } from './lib/telemetry.mjs';
@@ -98,15 +99,38 @@ if (config.rejectedOverrides?.length) {
 // ------------------------------------------------------ environment contract ----
 // There is none. `REQUIRED_ENV` is empty by design — see `lib/config.mjs` for what each retired
 // variable was replaced by. The advisory below is all that remains, and it never blocks.
+// One check per variable, each carrying its own remedy. A single rolled-up warning printed one
+// hardcoded sentence about the advisor tool whatever it had found, so a second entry would have
+// been reported with the wrong remedy — the §U shape, in the file whose whole job is to tell a
+// user what to do about something.
+for (const [name, spec] of Object.entries(RECOMMENDED_ENV)) {
+  const set = process.env[name] === spec.value;
+  add(`environment-recommended:${name}`, set ? 'pass' : 'warn',
+    set ? `${name}=${spec.value}` : `${name} is not set. ${spec.why}`,
+    spec.remedy);
+}
+
+// Reported, never a gate: a run on the 5-minute tier is dearer and completely correct. This says
+// what *will* happen; the final report says what did, read from the transcripts rather than here.
 {
-  const advisory = Object.entries(RECOMMENDED_ENV)
-    .filter(([name, spec]) => process.env[name] !== spec.value)
-    .map(([name, spec]) => `${name} (${spec.why})`);
-  if (advisory.length) {
-    add('environment-recommended', 'warn',
-      `Not set: ${advisory.join('; ')}`,
-      'Optional, and nothing installs it. Escalation still works; a second advisor simply arbitrates outside this run\'s ledger.');
-  }
+  const cache = subagentCacheState();
+  const wanted = cacheEnabled(config);
+  const detail = cache.forced5m
+    ? 'FORCE_PROMPT_CACHING_5M is set in this session and outranks the enable inside the harness, '
+      + 'so the run will stay on the 5-minute subagent cache.'
+    : !wanted
+      ? 'Disabled by .hyperpowers.json (cache.subagent1h: false). Subagents will use the 5-minute cache.'
+      : cache.on
+        ? `Already in force via ${cache.file}.`
+        : `The run will set ENABLE_PROMPT_CACHING_1H in ${cache.file} when it starts, and take it `
+          + 'back when it ends — subagents otherwise lose their context every five minutes while '
+          + 'the main thread keeps an hour of it. Nothing is written into the project. That file '
+          + 'is your user config, so while the run lasts the setting applies to every Claude Code '
+          + 'session sharing it, not only this one.';
+  add('subagent-cache', cache.forced5m || !wanted ? 'warn' : 'pass', detail,
+    cache.forced5m
+      ? 'Unset FORCE_PROMPT_CACHING_5M to let the run install the 1-hour subagent cache.'
+      : 'Nothing to do. Set cache.subagent1h to false in .hyperpowers.json to opt out.');
 }
 {
   const where = describeDataRoot();

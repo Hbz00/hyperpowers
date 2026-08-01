@@ -18,7 +18,7 @@ import { readJson, readText, writeFileAtomic } from './lib/io.mjs';
 import { tryLoadState, loadState } from './lib/state.mjs';
 import { REVIEW_ROUNDS, EXTRA_ROUNDS, TERMINAL_PHASES } from './lib/phases.mjs';
 import { summarise, scoreAgainstTargets } from './lib/telemetry.mjs';
-import { directorTier, analyseTranscript, analyseRoles, transcriptPathFor } from './lib/transcript.mjs';
+import { directorTier, analyseTranscript, analyseRoles, cachePosture, transcriptPathFor } from './lib/transcript.mjs';
 
 const { positional, flags } = parseArgs();
 const projectRoot = resolveProjectRoot(flags);
@@ -240,8 +240,8 @@ function renderFinal() {
   // are separated because their remedies differ: re-reading wants less carried context, cache
   // re-writing wants fewer expiry windows or a cheaper tier.
   try {
-    const roles = analyseRoles(transcriptPathFor(state), { since: state.createdAt })
-      .filter((r) => r.costUsd >= 0.005);
+    const allRoles = analyseRoles(transcriptPathFor(state), { since: state.createdAt });
+    const roles = allRoles.filter((r) => r.costUsd >= 0.005);
     if (roles.length) {
       p('', '### Cost by role', '');
       p('| Role | Dispatches | Requests | Output tokens | Generation | Cache write | Cache read | Fresh input | Cost |',
@@ -252,6 +252,41 @@ function renderFinal() {
         p(`| ${r.role} | ${r.dispatches} | ${r.messages} | ${r.outputTokens.toLocaleString()} | ` +
           `$${r.generationUsd.toFixed(2)} | $${r.cacheWriteUsd.toFixed(2)} | $${r.cacheReadUsd.toFixed(2)} | ` +
           `$${r.freshInputUsd.toFixed(2)} | $${r.costUsd.toFixed(2)} |`);
+      }
+    }
+
+    // Waiting, priced. The dearest thing a director does is not think — it waits for a child and
+    // then pays for a whole context again, because a subagent's prompt cache expires in about five
+    // minutes (§T2) while the main thread's lasts an hour (§V15). Without these two counters the
+    // largest single line of a run is invisible: run 10's director spent 74.6% of $15.69 on
+    // re-establishment across 14 long waits, and every table above showed it only as "cache write".
+    const posture = cachePosture(allRoles);
+    if (posture.longWaits > 0 || posture.ttl !== 'unknown') {
+      p('', '### Waiting, and what the waits cost', '');
+      p(`Subagent prompt-cache TTL, **observed** from the transcripts: **${posture.ttl}**`
+        + (posture.share === null ? '' : ` (${(posture.share * 100).toFixed(0)}% of subagent cache writes went to the 1-hour tier)`) + '.', '');
+      if (posture.ttl === '5m') {
+        p('A run normally installs the 1-hour tier at `init`, so 5m means it did not — the '
+          + '`subagent_cache` telemetry event says why. Each wait below then cost a full context '
+          + 're-establishment: 7–13% of a run (§V15). Nothing gates on it.', '');
+      }
+      if (posture.ttl === 'mixed') {
+        p('_Mixed is the expected shape: the requests before `init` are on the 5-minute tier and '
+          + 'everything after is not._', '');
+      }
+      p('| Role | Waits ≥5 min | Cache expiries crossed | Context re-established |',
+        '| --- | --- | --- | --- |');
+      const waiting = allRoles.filter((x) => x.longWaits > 0).sort((x, y) => y.coldWriteTokens - x.coldWriteTokens);
+      for (const r of waiting) {
+        p(`| ${r.role} | ${r.longWaits} | ${r.coldWindows} | ${r.coldWriteTokens.toLocaleString()} tokens |`);
+      }
+      if (!waiting.length) p('| _none_ | 0 | 0 | 0 tokens |');
+      // The main thread has always been on the 1-hour tier, so its row is counted against a
+      // different clock and a reader who merges the two rows draws the wrong conclusion from the
+      // paragraph above. Said only when there is a row to misread.
+      if (waiting.some((r) => r.role === 'main-thread' && r.coldWindows > 0)) {
+        p('', '_The `main-thread` row is measured against the **1-hour** tier it already has, not '
+          + 'the 5-minute one: a crossing there means an idle window longer than an hour._');
       }
     }
   } catch { /* the role table is additive; a run whose transcripts are gone still gets a report */ }

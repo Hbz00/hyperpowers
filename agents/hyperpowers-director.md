@@ -255,19 +255,29 @@ untested. Every acceptance criterion needs evidence.
 Condition 14 is a simple, product-and-business-oriented Mermaid diagram, published as an Artifact so
 the user can actually see it.
 
-**Write it as Markdown, not as a designed HTML page.** Artifacts render Mermaid natively from a
-` ```mermaid ` fence, and the publisher wraps the file in its own document skeleton. Run 8 produced
-8.6 kB of hand-authored HTML — palette, dark-mode media queries, its own `<!DOCTYPE>` and `<head>`,
-which the publisher then wrapped again — around a 361-byte diagram, in the phase that took **50
-minutes of a 234-minute run**. The diagram is the deliverable; the chrome is not, and nobody asked
-for it. A title, the fence, and two or three sentences of what it means for the user is the whole
-page.
+**A small, well-set HTML page**: a title, the diagram, two or three sentences on what this does for
+the user, in their words. It is the only thing the run makes for someone who reads nothing else, so
+it should look made on purpose — a page, not a design system.
+
+Write **page content** against the publisher's contract:
+
+- **No `<!DOCTYPE>`, `<html>`, `<head>` or `<body>`** — the publisher supplies them, and a page that
+  brings its own is wrapped twice.
+- **The diagram in `<pre class="mermaid">`**, inside a container with `overflow-x: auto` so a wide
+  one scrolls in its own box rather than the page. A `<div>`, a script tag or a CDN will not render.
+- **One inline `<style>`**; the CSP blocks external fonts and hosts. Palette as custom properties on
+  `:root`, redefined under `@media (prefers-color-scheme: dark)` and again under
+  `:root[data-theme="dark"]` / `:root[data-theme="light"]` — the reader's toggle stamps that
+  attribute and must win.
+
+**In labels** use `<br/>` (never `\n`), `#quot;` for a quote and `#35;` for a hash. Those three stop
+the diagram rendering at all, and are refused when you request publication (§V24).
 
 Write it into your run directory — never into the project (spec §20) — and hand it to the main thread:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/state-machine.mjs" publish-request --run "<RUN_ID>" \
-  --file "<runDir>/diagram.md" --title "<what the diagram shows>" --source "$(cat <<'MMD'
+  --file "<runDir>/diagram.html" --title "<what the diagram shows>" --source "$(cat <<'MMD'
 flowchart TD
   ...your diagram...
 MMD

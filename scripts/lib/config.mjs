@@ -62,6 +62,33 @@ export function isDirectorMeta(meta) {
 }
 
 /**
+ * How long nothing may write before the status line says so — derived, never picked.
+ *
+ * The predecessor was 30 minutes justified by "17.7 minutes is the longest a working agent has gone
+ * without writing a message". That number came from wall-clock on a machine that had slept, and the
+ * claim did not survive being re-measured in **awake** time across three runs and 6,448 writes: the
+ * longest legitimate silence with no Codex round running is **9.1 minutes** (§V22).
+ *
+ * Two independent floors, and the bound is the larger:
+ *
+ *  - **20 minutes** is over twice the measured maximum, and an order of magnitude below the two real
+ *    stalls on record (5h14 and 9h).
+ *  - **`codex.timeoutMs` + 5 min**, because a Codex round is the one operation that legitimately
+ *    blocks everything without writing anything. The status line detects a round in flight and shows
+ *    it rather than warning — but if that detection ever fails, this floor means a round still
+ *    cannot raise a false alarm. A project that raises the Codex timeout raises this with it.
+ *
+ * A quiet window is not the same as an idle run: the run may be *waiting for the user*, which
+ * `pendingErrand()` reports and which suppresses the warning outright. Run `vv1ffc` sat 5h14 in
+ * `FINAL_ACCEPTANCE` waiting for an Artifact publication and then completed — a warning telling its
+ * owner to abort would have destroyed a run fifteen seconds of human action from `COMPLETE`.
+ */
+export function quietWarnMs(config) {
+  const codex = Number(config?.codex?.timeoutMs);
+  return Math.max(20 * 60 * 1000, (Number.isFinite(codex) ? codex : 0) + 5 * 60 * 1000);
+}
+
+/**
  * The block at which a controller yields to `SUSPENDED`, one implementation for both loops.
  *
  * The main thread and the director each have their own counter and their own harness cap (§R6),
@@ -219,6 +246,18 @@ export const DEFAULTS = Object.freeze({
    * property of the project for anyone who wants that.
    */
   git: { mode: 'read-only', enforce: 'run' },
+
+  /**
+   * The 1-hour subagent prompt cache, installed while a run is live.
+   *
+   * On by default: the 5-minute alternative bills every wait over five minutes as a full context
+   * re-establishment, 7–13% of a run, against a 2× write premium on agents that never wait — both
+   * measured (§V15). This is the opt-out, and the reason it exists is that the setting reaches
+   * **every session sharing `~/.claude/`**, not only the one running the feature: an unrelated
+   * session whose prefixes are never reused past minute five pays that premium for nothing.
+   * `session-settings.mjs` owns the mechanism and states the arithmetic.
+   */
+  cache: { subagent1h: true },
 
   /**
    * Parallel writes are opt-in per spec §15 and require disjoint, owned file sets. These are
@@ -463,11 +502,23 @@ export function loadConfig(projectRoot) {
  */
 export const REQUIRED_ENV = Object.freeze({});
 
+/**
+ * Settings that make a run cheaper or quieter, and that **no run requires**.
+ *
+ * Each entry carries its own `remedy`, because preflight used to iterate this map and print one
+ * hardcoded sentence about the advisor tool for whatever it found — the §U shape exactly: a
+ * remedy that names one variable while the loop covers all of them. Adding a second entry would
+ * have made that sentence a lie about the new one.
+ */
 export const RECOMMENDED_ENV = Object.freeze({
   CLAUDE_CODE_DISABLE_ADVISOR_TOOL: {
     value: '1',
     why: 'Hyperpowers supplies its own escalation path; a second advisor would arbitrate outside the ledger (spec §17). Optional: no run mechanism reads it.',
+    remedy: 'Optional, and nothing installs it. Escalation still works; a second advisor simply arbitrates outside this run\'s ledger.',
   },
+  // `ENABLE_PROMPT_CACHING_1H` was briefly an entry here. It is not advice any more: the run sets
+  // it itself (`session-settings.mjs`), because asking a user to do what the run can do for itself
+  // is the install step this map exists to avoid.
 });
 
 /**

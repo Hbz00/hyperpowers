@@ -42,9 +42,20 @@ import { sha256, nowIso } from './io.mjs';
  *
  * One list, used by both, or the two halves disagree about what the change even is.
  */
+/**
+ * The project-scoped Claude settings file, spelled once.
+ *
+ * Hyperpowers does **not** write here — `session-settings.mjs` deliberately uses the *user*
+ * settings file instead, because the settings watch is established on `.claude/` at startup and a
+ * repository without that directory would never notice the write (§V17). The path matters anyway:
+ * the user may well have one, and it is Hyperpowers' concern rather than the feature's, so it stays
+ * excluded from the review pack and from the completion gate's working-tree digest.
+ */
+export const LOCAL_SETTINGS = '.claude/settings.local.json';
+
 export const HYPERPOWERS_OWN_FILES = Object.freeze([
   '.claude/settings.json',
-  '.claude/settings.local.json',
+  LOCAL_SETTINGS,
   '.hyperpowers.json',
 ]);
 

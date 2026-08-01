@@ -6,11 +6,13 @@
  * be true for the run to be where it is. A progress bar fed by a bespoke counter would display a
  * confident number about a run nobody was measuring, which is worse than no bar at all.
  *
- * It is deliberately *not* a percentage of time. The measured spread is `DESIGN_LOCK` at 24–26 min
- * and `PLAN_LOCK` at 54–57 min across three runs, but only **one** run has ever been timed to
- * `COMPLETE`. Dividing by an n=1 denominator would give a guess the authority of a measurement.
- * So the bar is a weighted walk over milestones, and elapsed time and spend ride beside it as
- * text — never as the thing that fills it.
+ * It is deliberately *not* a percentage of time, and §V22 made that stronger rather than weaker:
+ * **every duration this repository has ever quoted from wall-clock is unsound until the machine's
+ * sleep intervals are subtracted.** One watched run was 61% asleep, and three claims built on its
+ * timings were retracted. Runs that reach `COMPLETE` differ by more than 2× in length besides. A
+ * percentage divided by any of that would give a guess the authority of a measurement, so the bar is
+ * a weighted walk over milestones, and elapsed time and spend ride beside it as text — never as the
+ * thing that fills it. If you want to quote a duration here, read §V22 first.
  */
 
 import { readJson } from './io.mjs';
@@ -98,6 +100,24 @@ function readJsonSafe(p) {
 }
 
 /**
+ * The most recently evaluated gate that is currently failing, or `null`.
+ *
+ * Most recently evaluated rather than first found, because a run carries every gate it has ever run
+ * and an early failure that a later pass superseded is not what is blocking anything now. The
+ * verdict and its `evidence` are written by `verify-completion.mjs` on failure exactly as on
+ * success, so this reads a fact nobody has to remember to record.
+ */
+function failingGate(state) {
+  const failing = Object.entries(state?.gates ?? {})
+    .filter(([, g]) => g && g.passed === false)
+    .sort((a, b) => (Date.parse(b[1].at ?? 0) || 0) - (Date.parse(a[1].at ?? 0) || 0));
+  if (!failing.length) return null;
+  const [name, gate] = failing[0];
+  // `evidence` reads "12/13 conditions passed"; the ratio is the part that fits on a row.
+  return { name, ratio: /^(\d+\/\d+)/.exec(gate.evidence ?? '')?.[1] ?? null };
+}
+
+/**
  * `{ percent, phase, segment, retries, tasks }` — or `null` when there is nothing to show.
  *
  * `null` is a real answer and callers must render nothing for it: a status line that decorates a
@@ -124,7 +144,20 @@ export function runProgress(projectRoot, runId) {
 
   const list = Array.isArray(tasks?.tasks) ? tasks.tasks : [];
   const updatedAt = Date.parse(state.updatedAt ?? '');
+  const createdAt = Date.parse(state.createdAt ?? '');
   return {
+    // The raw stamp, so the one consumer that needs a *cutoff* rather than a duration — the cost
+    // scan — does not have to re-read `state.json` behind this function's back.
+    createdAt: state.createdAt ?? null,
+    // How old the run is. Not how old the current *dispatch* is: the director is resumed and
+    // re-dispatched, so its task's `startTime` restarts while the run does not — and that field is
+    // an epoch **number** in the payload, which `Date.parse` turns into `NaN`, so the cell fed by it
+    // never rendered at all across a five-hour run (§V22).
+    ageMs: Number.isFinite(createdAt) ? Math.max(0, Date.now() - createdAt) : null,
+    // The gate standing between this phase and the next, when there is one. A run sat 17 minutes in
+    // `DESIGN_LOCK` with `passed: false` on record and nothing on screen; `verify-completion.mjs`
+    // stores the failure exactly as it stores the pass, evidence included.
+    failingGate: failingGate(state),
     // A terminal COMPLETE is the one place the bar may assert 100: the completion gate is the
     // fourteen conditions, so it is the only claim of doneness this codebase accepts.
     percent: state.phase === 'COMPLETE' ? 100 : Math.min(99, Math.round(percent)),
@@ -132,7 +165,13 @@ export function runProgress(projectRoot, runId) {
     segment: current.label,
     retries: reached.retries,
     terminal: isTerminal(state.phase),
-    tasks: list.length ? { accepted: list.filter((t) => t?.status === 'accepted').length, total: list.length } : null,
+    // Only from `EXECUTION` onwards. `tasks.json` is written by the *plan*, so the cell appeared in
+    // `PLAN_DRAFT` reading `0/3` — at a point where no package **can** be accepted, which reads as a
+    // failure rather than as "not started". Measured on run x7vii1 at 18:02, and it is the question
+    // that opened this whole line of work.
+    tasks: list.length && reached.index >= phaseIndex('EXECUTION')
+      ? { accepted: list.filter((t) => t?.status === 'accepted').length, total: list.length }
+      : null,
     // How long since anything mutated the run. `saveState` stamps `updatedAt` on every mutation,
     // so this obeys the file's own rule — no field anybody has to remember to update — and it is
     // the one signal that keeps moving on this surface while every hook is silent: a wedged

@@ -1982,6 +1982,7 @@ describe('§Q13 — the plan gate refuses a package no agent can finish', () => 
     const proj = path.join(tmp, 'proj');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const run = JSON.parse(execFileSync('node', [
       path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's1',
     ], { encoding: 'utf8', env }));
@@ -2095,6 +2096,7 @@ describe('§Q14 — a wrongly-typed field is refused, never a crash', () => {
     const proj = path.join(tmp, 'proj');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const init = JSON.parse(execFileSync('node', [
       path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's',
     ], { encoding: 'utf8', env }));
@@ -2236,6 +2238,7 @@ describe('§Q15 — the completion digest binds to substance, not to labels', ()
     const proj = path.join(tmp, 'proj');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const git = (...args) => execFileSync('git', args, { cwd: proj, encoding: 'utf8' });
     git('init', '-q', '.');
     fs.writeFileSync(path.join(proj, 'app.py'), 'def add(a, b):\n    return a + b\n');
@@ -2763,6 +2766,7 @@ describe('§S8b — a question packet cannot be written into the project', () =>
     const proj = path.join(tmp, 'project');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const sm = (args) => execFileSync('node', [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, ...args], { encoding: 'utf8', env });
     const runId = JSON.parse(sm(['init', '--session', 's8', '--description', 'x'])).runId;
 
@@ -2823,6 +2827,7 @@ describe('§S9 — progress is derived, never declared', () => {
     const proj = path.join(tmp, 'project');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const runId = JSON.parse(execFileSync('node',
       [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 's9', '--description', 'x'],
       { encoding: 'utf8', env })).runId;
@@ -2884,6 +2889,11 @@ describe('§S9 — progress is derived, never declared', () => {
       fs.mkdirSync(subs, { recursive: true });
       fs.writeFileSync(path.join(subs, 'agent-dir-idle.meta.json'),
         JSON.stringify({ agentType: 'hyperpowers:hyperpowers-director', spawnDepth: 1 }));
+      // A transcript too, and its mtime moved with the state: silence is "nothing wrote anywhere",
+      // so a fixture whose agents have no transcript at all cannot be called quiet — `lastWriteAt`
+      // returning `null` means *unreadable*, not *silent* (§V22).
+      const jsonl = path.join(subs, 'agent-dir-idle.jsonl');
+      fs.writeFileSync(jsonl, '{}\n');
 
       const rowAt = (updatedAt) => {
         const file = path.join(init.runDir, 'state.json');
@@ -2891,6 +2901,7 @@ describe('§S9 — progress is derived, never declared', () => {
         state.updatedAt = updatedAt;
         state.phase = 'EXECUTION'; // non-terminal: a finished run is not a wedged one
         fs.writeFileSync(file, JSON.stringify(state));
+        fs.utimesSync(jsonl, new Date(updatedAt), new Date(updatedAt));
         const out = execFileSync('node', [path.join(ROOT, 'scripts', 'statusline.mjs')], {
           encoding: 'utf8',
           env: e,
@@ -2903,13 +2914,12 @@ describe('§S9 — progress is derived, never declared', () => {
       };
 
       const stale = rowAt(new Date(Date.now() - 31 * 60 * 1000).toISOString());
-      assert.match(stale, /idle/);
-      assert.match(stale, /run may be wedged/,
+      assert.match(stale, /nothing has written for/,
         'detection is the honest ceiling here — no plugin surface can cancel a wedged dispatch, '
         + 'and a human told in time can');
       assert.match(stale, /EXECUTION/, 'the ordinary row survives; the warning rides beside it');
 
-      assert.doesNotMatch(rowAt(new Date().toISOString()), /run may be wedged/,
+      assert.doesNotMatch(rowAt(new Date().toISOString()), /nothing has written/,
         'a warning on a healthy run is a warning people learn to scroll past');
     } finally {
       try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -2931,6 +2941,7 @@ describe('§S9 — progress is derived, never declared', () => {
     const proj = path.join(tmp, 'project');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const init = JSON.parse(execFileSync('node',
       [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 'v14', '--description', 'x'],
       { encoding: 'utf8', env }));
@@ -2939,7 +2950,32 @@ describe('§S9 — progress is derived, never declared', () => {
     fs.writeFileSync(transcript, '');
     const subs = path.join(transcript.replace(/\.jsonl$/, ''), 'subagents');
     fs.mkdirSync(subs, { recursive: true });
-    const meta = (id, o) => fs.writeFileSync(path.join(subs, `agent-${id}.meta.json`), JSON.stringify(o));
+    // Meta **and** transcript: the transcript's mtime is how the row tells a director that is
+    // waiting from a run that has stopped, so a fixture without one cannot exercise §V22 at all.
+    const meta = (id, o, wroteMsAgo = 1_000) => {
+      fs.writeFileSync(path.join(subs, `agent-${id}.meta.json`), JSON.stringify(o));
+      const jsonl = path.join(subs, `agent-${id}.jsonl`);
+      fs.writeFileSync(jsonl, '{}\n');
+      const at = new Date(Date.now() - wroteMsAgo);
+      fs.utimesSync(jsonl, at, at);
+    };
+    const silence = (ms, ids = ['dir', 'coord', 'res', 'i1', 'i2', 'te', 'alien']) => {
+      const at = new Date(Date.now() - ms);
+      for (const id of ids) {
+        try { fs.utimesSync(path.join(subs, `agent-${id}.jsonl`), at, at); } catch { /* absent */ }
+      }
+      patch({ updatedAt: at.toISOString() });
+    };
+    const errand = () => fs.writeFileSync(path.join(init.runDir, 'publish.json'),
+      JSON.stringify({ askedAt: new Date().toISOString() }));
+    const codex = (round, startedMsAgo) => {
+      const dir = path.join(init.runDir, 'review-packs');
+      fs.mkdirSync(dir, { recursive: true });
+      const f = path.join(dir, `${round}.prompt.md`);
+      fs.writeFileSync(f, 'pack');
+      const at = new Date(Date.now() - startedMsAgo);
+      fs.utimesSync(f, at, at);
+    };
 
     // The pyramid a real run makes: Fable at 1, an Opus coordinator at 2, Sonnet workers at 3 —
     // plus an agent that belongs to somebody else entirely, which a live run does not make ours.
@@ -2973,8 +3009,12 @@ describe('§S9 — progress is derived, never declared', () => {
         env,
         input: JSON.stringify({
           session_id: 'v14', cwd: proj, transcript_path: transcript, columns,
+          // `startTime` is an epoch **number** here because that is what the harness sends
+          // (`kw(...)` sets `startTime: Date.now()`). The previous fixture sent an ISO string, which
+          // encoded the presumption instead of the measurement — and that is precisely why the
+          // elapsed cell could be dead for a whole five-hour run with the suite green (§V22).
           tasks: Object.fromEntries(live.map((id) => [id, {
-            id, type: 'local_agent', startTime: new Date(Date.now() - 3_900_000).toISOString(),
+            id, type: 'local_agent', startTime: Date.now() - 3_900_000,
           }])),
         }),
       });
@@ -2985,7 +3025,9 @@ describe('§S9 — progress is derived, never declared', () => {
       }
       return byId;
     };
-    return { rows, patch, meta };
+    return {
+      rows, patch, meta, silence, errand, codex, runDir: init.runDir,
+    };
   };
 
   const plain = (s) => String(s).replace(/\u001B\[[0-9;]*m/g, '');
@@ -3045,21 +3087,109 @@ describe('§S9 — progress is derived, never declared', () => {
   });
 
   test('the bar is the last thing to go, at every width', (t) => {
-    // The shipped defect: the idle warning is ~57 characters, the bar was sized from whatever was
-    // left, and `bar()` draws nothing below 8 — so the bar vanished exactly when the run was in
-    // trouble. The fitter sheds cells by an explicit rank instead, and the warning outranks the
-    // phase name because it is the one cell a human can act on.
-    const { rows, patch } = panel(t);
-    patch({ updatedAt: new Date(Date.now() - 45 * 60_000).toISOString() });
+    // The shipped defect: the warning is ~57 characters, the bar was sized from whatever was left,
+    // and `bar()` draws nothing below 8 — so the bar vanished exactly when the run was in trouble.
+    // The fitter sheds cells by an explicit rank instead, and the activity cell outranks the phase
+    // name because it is the one cell on the row a human can act on.
+    const { rows, silence } = panel(t);
+    silence(45 * 60_000);
     for (const columns of [200, 116, 76, 56, 40]) {
       const row = plain(rows(columns).dir);
       assert.ok(row.includes('█'), `the bar must survive ${columns} columns: ${row}`);
-      assert.match(row, /idle 45m/, `so must the warning at ${columns} columns: ${row}`);
+      assert.match(row, /45m/, `so must the warning at ${columns} columns: ${row}`);
       assert.ok(row.length <= columns, `${columns} columns, ${row.length} drawn: ${row}`);
     }
-    // And what is shed is shed in order: the roster before the warning, never the other way.
+  });
+
+  test('the roster is shed before the cells that say what is wrong', (t) => {
+    const { rows } = panel(t);
     assert.match(plain(rows(200).dir), /↳ execution researcher/, 'wide enough for everything');
-    assert.doesNotMatch(plain(rows(56).dir), /↳/, 'narrow enough that the roster is what pays');
+    assert.doesNotMatch(plain(rows(40).dir), /↳ execution/,
+      'narrow enough that the roster is the cell that pays');
+  });
+
+  /**
+   * §V22 — five states, one cell, and an order taken from what reading it wrong costs.
+   *
+   * Every case below is something a real run did. The threshold they turn on is derived rather than
+   * chosen: across three runs and 6,448 writes, in **awake** time with the machine's sleep intervals
+   * subtracted, the longest legitimate silence with no Codex round running is 9.1 minutes.
+   */
+  test('a parked errand outranks everything, including a five-hour silence', (t) => {
+    // Run `vv1ffc` sat 5h14 in FINAL_ACCEPTANCE with a parked Artifact publication and then reached
+    // COMPLETE. Every silence rule calls that a stalled run. It was a run waiting for its owner,
+    // fifteen seconds of human action from done — and a row saying "abort" would have destroyed it.
+    const { rows, silence, errand } = panel(t);
+    silence(5 * 3600_000);
+    errand();
+    const row = plain(rows(200).dir);
+    assert.match(row, /waiting for you/, 'the run is waiting for a human, not stalled');
+    assert.doesNotMatch(row, /nothing has written/,
+      'silence must never override an errand — that is the one combination that destroys a run');
+  });
+
+  test('a director waiting on a delegate that is writing is not reported as silent', (t) => {
+    // Measured live at 19:09 on run x7vii1: state untouched for 45 minutes because the director was
+    // inside a synchronous dispatch, while an adjudicator wrote that same second. The shipped rule
+    // read `state.updatedAt` alone and told its owner the run "may be wedged; abort".
+    const { rows, silence, meta } = panel(t);
+    silence(45 * 60_000);
+    meta('coord', { agentType: 'hyperpowers:opus-execution-coordinator', spawnDepth: 2, parentAgentId: 'dir' }, 5_000);
+    assert.doesNotMatch(plain(rows(200).dir), /nothing has written/,
+      'what is running is a claim; what has written is a fact');
+
+    // And the fact still catches the stall it exists for: registered delegates, none of them writing.
+    silence(45 * 60_000);
+    assert.match(plain(rows(200).dir), /nothing has written for/,
+      'in the 9-hour stall the delegates were still registered — they were simply dead');
+  });
+
+  test('a Codex round shows as a round, not as silence', (t) => {
+    // Codex runs through Bash rather than as a subagent, so nothing enters the roster and the row
+    // was frozen for the duration — 22 minutes across one run's four rounds. The adapter already
+    // writes the pack at the start and the answer at the end; a pack without an answer is a round.
+    const { rows, silence, codex } = panel(t);
+    silence(6 * 60_000);
+    codex('plan-2', 6 * 60_000);
+    assert.match(plain(rows(200).dir), /⟳ codex plan-2/);
+  });
+
+  test('a failing gate is on the row while it is failing', (t) => {
+    // 17 minutes in DESIGN_LOCK with `passed: false` on record and nothing on screen. The verifier
+    // stores a failure exactly as it stores a pass, evidence included.
+    const { rows, patch } = panel(t);
+    patch({ gates: { design: { passed: false, at: new Date().toISOString(), evidence: '12/13 conditions passed' } } });
+    assert.match(plain(rows(200).dir), /⛔ gate design 12\/13/);
+  });
+
+  test('the run’s age renders even though the harness sends startTime as a number', (t) => {
+    // `kw(...)` sets `startTime: Date.now()`, so `Date.parse(task.startTime)` is NaN and the cell it
+    // fed never rendered once in five hours. The age comes from `state.createdAt` now, which is also
+    // the more useful number: the director is re-dispatched, so its task's start is not the run's.
+    const { rows, patch } = panel(t);
+    patch({ createdAt: new Date(Date.now() - 5 * 3600_000).toISOString() });
+    assert.match(plain(rows(200).dir), /\b5h00\b/);
+  });
+
+  test('work packages appear only once they can be accepted', (t) => {
+    // `tasks.json` is written by the plan, so the cell read `0/3` in PLAN_DRAFT — at a point where no
+    // package *can* be accepted, which reads as a failure rather than as "not started".
+    const { rows, patch } = panel(t);
+    patch({ phase: 'PLAN_DRAFT', history: ['INTAKE', 'BRAINSTORMING', 'DESIGN_DRAFT', 'PLAN_DRAFT'].map((to) => ({ to })) });
+    assert.doesNotMatch(plain(rows(200).dir), /wp/, 'nothing to report before EXECUTION');
+    patch({ phase: 'EXECUTION', history: ['INTAKE', 'BRAINSTORMING', 'DESIGN_DRAFT', 'EXECUTION'].map((to) => ({ to })) });
+    assert.match(plain(rows(200).dir), /1\/3 wp/);
+  });
+
+  test('the quiet threshold clears the Codex timeout by construction', async () => {
+    // Two independent floors, so a Codex round cannot raise a false alarm even if the round detector
+    // fails, and a project that raises the Codex timeout raises this with it.
+    const { quietWarnMs, DEFAULTS } = await import('../scripts/lib/config.mjs');
+    assert.ok(quietWarnMs(DEFAULTS) > DEFAULTS.codex.timeoutMs,
+      'the longest operation that legitimately writes nothing must not trip the warning');
+    assert.equal(quietWarnMs({ codex: { timeoutMs: 60 * 60_000 } }), 65 * 60_000,
+      'and a project that lengthens that operation lengthens the threshold with it');
+    assert.equal(quietWarnMs({}), 20 * 60_000, 'over twice the 9.1 min measured maximum');
   });
 
   test('colour never counts against the width budget', (t) => {
@@ -3195,6 +3325,7 @@ describe('§S11 — resuming clears both block counters', () => {
     const proj = path.join(tmp, 'project');
     fs.mkdirSync(proj, { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const sm = (args) => execFileSync('node',
       [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, ...args], { encoding: 'utf8', env });
     const runId = JSON.parse(sm(['init', '--session', 's11', '--description', 'x'])).runId;
@@ -3866,6 +3997,7 @@ describe('§S13 — the impostor director is ignored', () => {
     fs.mkdirSync(proj, { recursive: true });
     fs.mkdirSync(path.join(tx, 'session', 'subagents'), { recursive: true });
     const env = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete env.NO_COLOR;  // fixtures must not inherit the operator's terminal preference (§V25)
     const runId = JSON.parse(execFileSync('node',
       [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 'sess13', '--description', 'x'],
       { encoding: 'utf8', env })).runId;
@@ -7373,5 +7505,747 @@ describe('the fourth pass — report binding, depth validation, spaced paths', (
     assert.doesNotMatch(src, /import\.meta\.url\)\.pathname|new URL\([^)]*\)\.pathname/,
       'file URLs must be converted with fileURLToPath, never read as .pathname');
     assert.match(src, /fileURLToPath/);
+  });
+});
+
+/**
+ * §V15 — the 5-minute subagent prompt cache is an allowlist, not a law, and the run must be able
+ * to say which side of it the run actually landed on.
+ *
+ * Three claims are pinned here, and each is a claim some comment in the source now makes:
+ *
+ *   1. Every `RECOMMENDED_ENV` entry carries its own remedy. Preflight iterates the map; it used to
+ *      print one hardcoded sentence about the advisor tool whatever it found, so the second entry
+ *      would have been reported with the first one's remedy. §U's "count the sites", made a count.
+ *   2. `analyseRoles` separates *waiting* from *paying for having waited*. Both counters matter and
+ *      they are not the same number: the whole point of the TTL change is that the waits stay and
+ *      the expiries go, so a run that conflated them could not show the change worked.
+ *   3. `cachePosture` reads the TTL that was **observed**, never the environment variable that was
+ *      asked for — the discipline `directorTier` holds, one measurement over.
+ */
+describe('§V15 — the subagent cache TTL is recommended, measured, and never required', () => {
+  test('every recommended variable carries its own remedy', async () => {
+    const { RECOMMENDED_ENV, REQUIRED_ENV } = await import('../scripts/lib/config.mjs');
+    // Deliberately *not* here: §V17 made the 1-hour cache something the run installs for itself,
+    // so advising it would be the install step this map exists to avoid.
+    assert.ok(!('ENABLE_PROMPT_CACHING_1H' in RECOMMENDED_ENV),
+      'the run sets this itself at init — see session-settings.mjs');
+    assert.deepEqual(Object.keys(REQUIRED_ENV), [],
+      'a cheaper run is never a reason to refuse to start one');
+    for (const [name, spec] of Object.entries(RECOMMENDED_ENV)) {
+      for (const field of ['value', 'why', 'remedy']) {
+        assert.equal(typeof spec[field], 'string', `${name}.${field} must be its own text`);
+        assert.ok(spec[field].length > 0, `${name}.${field} is empty`);
+      }
+    }
+    // The remedies must actually differ, or "each carries its own" is satisfied by copying one.
+    const remedies = new Set(Object.values(RECOMMENDED_ENV).map((s) => s.remedy));
+    assert.equal(remedies.size, Object.keys(RECOMMENDED_ENV).length,
+      'two variables sharing a remedy is the hardcoded sentence wearing a different shape');
+  });
+
+  test('preflight emits one check per recommended variable, with that variable\'s remedy', async () => {
+    const { RECOMMENDED_ENV } = await import('../scripts/lib/config.mjs');
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-recenv-'));
+    try {
+      const bare = { ...env() };
+      for (const name of Object.keys(RECOMMENDED_ENV)) delete bare[name];
+      const res = spawnSync('node', [path.join(ROOT, 'scripts', 'preflight.mjs'), '--project', proj],
+        { encoding: 'utf8', env: bare });
+      const out = JSON.parse(res.stdout);
+      for (const [name, spec] of Object.entries(RECOMMENDED_ENV)) {
+        const check = out.checks.find((c) => c.id === `environment-recommended:${name}`);
+        assert.ok(check, `no check for ${name}: ${out.checks.map((c) => c.id).join(', ')}`);
+        assert.equal(check.status, 'warn', 'unset is a warning and never a failure');
+        assert.equal(check.remedy, spec.remedy, `${name} was given another variable's remedy`);
+      }
+      // Set, a recommended variable passes — otherwise the advice is unfalsifiable and nags forever.
+      const withVar = spawnSync('node', [path.join(ROOT, 'scripts', 'preflight.mjs'), '--project', proj],
+        { encoding: 'utf8', env: { ...bare, CLAUDE_CODE_DISABLE_ADVISOR_TOOL: '1' } });
+      const set = JSON.parse(withVar.stdout).checks
+        .find((c) => c.id === 'environment-recommended:CLAUDE_CODE_DISABLE_ADVISOR_TOOL');
+      assert.equal(set?.status, 'pass', JSON.stringify(set));
+
+      // And the cache is reported as the run's own doing, not as something to install.
+      const cache = out.checks.find((c) => c.id === 'subagent-cache');
+      assert.ok(cache, 'preflight must say which cache tier the run will use');
+      assert.match(cache.detail, /the run will set|Already in force|Disabled by|FORCE_PROMPT_CACHING_5M/i);
+      const forced = spawnSync('node', [path.join(ROOT, 'scripts', 'preflight.mjs'), '--project', proj],
+        { encoding: 'utf8', env: { ...bare, FORCE_PROMPT_CACHING_5M: '1' } });
+      const under = JSON.parse(forced.stdout).checks.find((c) => c.id === 'subagent-cache');
+      assert.equal(under?.status, 'warn', 'a session that outranks the enable must be said out loud');
+      assert.match(under.detail, /FORCE_PROMPT_CACHING_5M/);
+    } finally {
+      try { fs.rmSync(proj, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  test('a long wait and a crossed cache expiry are counted separately', async () => {
+    const { analyseRoles, cachePosture } = await import('../scripts/lib/transcript.mjs');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-ttl-'));
+    try {
+      const transcript = path.join(tmp, 'session.jsonl');
+      fs.writeFileSync(transcript, '');
+      const subs = path.join(transcript.replace(/\.jsonl$/, ''), 'subagents');
+      fs.mkdirSync(subs, { recursive: true });
+
+      const t0 = Date.parse('2026-07-31T10:00:00.000Z');
+      const at = (min) => new Date(t0 + min * 60_000).toISOString();
+      const row = (id, minute, usage) => JSON.stringify({
+        type: 'assistant', timestamp: at(minute),
+        message: { model: 'claude-fable-5', requestId: id, usage },
+      });
+      const use = ({ read, write, oneHour = 0 }) => ({
+        input_tokens: 5, output_tokens: 50,
+        cache_read_input_tokens: read, cache_creation_input_tokens: write,
+        cache_creation: { ephemeral_5m_input_tokens: write - oneHour, ephemeral_1h_input_tokens: oneHour },
+      });
+
+      fs.writeFileSync(path.join(subs, 'agent-d1.meta.json'),
+        JSON.stringify({ agentType: 'hyperpowers:hyperpowers-director', spawnDepth: 1 }));
+      fs.writeFileSync(path.join(subs, 'agent-d1.jsonl'), [
+        row('r1', 0, use({ read: 0, write: 60_000 })),          // first request: cold by construction
+        row('r2', 1, use({ read: 60_000, write: 2_000 })),      // warm, no wait
+        row('r3', 12, use({ read: 0, write: 55_000 })),         // 11 min wait, expiry crossed
+        row('r4', 24, use({ read: 70_000, write: 3_000 })),     // 12 min wait, cache held anyway
+      ].join('\n') + '\n');
+
+      const roles = analyseRoles(transcript);
+      const director = roles.find((r) => r.role === 'hyperpowers-director');
+      assert.ok(director);
+      assert.equal(director.longWaits, 2, 'two gaps over five minutes');
+      assert.equal(director.coldWindows, 1, 'only one of them was billed as a re-establishment');
+      assert.equal(director.coldWriteTokens, 55_000);
+      // The first request of a dispatch writes everything and waits for nothing: counting it as a
+      // wait would make every dispatch look like an expiry and the metric would never reach zero.
+      assert.ok(director.coldWindows < director.longWaits,
+        'a wait the cache survived must not be counted as an expiry');
+
+      const posture = cachePosture(roles);
+      assert.equal(posture.ttl, '5m', 'read from the transcript, not from process.env');
+      assert.equal(posture.longWaits, 2);
+      assert.equal(posture.coldWindows, 1);
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  test('cachePosture reports 1h when the subagent writes actually landed there', async () => {
+    const { analyseRoles, cachePosture } = await import('../scripts/lib/transcript.mjs');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-ttl1h-'));
+    try {
+      const transcript = path.join(tmp, 'session.jsonl');
+      // The main thread has been on the 1-hour tier all along; a posture that read the whole
+      // session would answer "1h" on a run where every subagent was on five minutes.
+      fs.writeFileSync(transcript, JSON.stringify({
+        type: 'assistant', timestamp: '2026-07-31T10:00:00.000Z',
+        message: {
+          model: 'claude-opus-5',
+          requestId: 'm1',
+          usage: {
+            input_tokens: 5, output_tokens: 10, cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 9_000,
+            cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 9_000 },
+          },
+        },
+      }) + '\n');
+      const subs = path.join(transcript.replace(/\.jsonl$/, ''), 'subagents');
+      fs.mkdirSync(subs, { recursive: true });
+      fs.writeFileSync(path.join(subs, 'agent-a1.meta.json'),
+        JSON.stringify({ agentType: 'hyperpowers:sonnet-implementer', spawnDepth: 2 }));
+      fs.writeFileSync(path.join(subs, 'agent-a1.jsonl'), JSON.stringify({
+        type: 'assistant', timestamp: '2026-07-31T10:01:00.000Z',
+        message: {
+          model: 'claude-sonnet-5',
+          requestId: 's1',
+          usage: {
+            input_tokens: 5, output_tokens: 10, cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 4_000,
+            cache_creation: { ephemeral_5m_input_tokens: 4_000, ephemeral_1h_input_tokens: 0 },
+          },
+        },
+      }) + '\n');
+
+      assert.equal(cachePosture(analyseRoles(transcript)).ttl, '5m',
+        'the main thread is not evidence about the subagents');
+
+      fs.writeFileSync(path.join(subs, 'agent-a1.jsonl'), JSON.stringify({
+        type: 'assistant', timestamp: '2026-07-31T10:01:00.000Z',
+        message: {
+          model: 'claude-sonnet-5',
+          requestId: 's1',
+          usage: {
+            input_tokens: 5, output_tokens: 10, cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 4_000,
+            cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 4_000 },
+          },
+        },
+      }) + '\n');
+      const after = cachePosture(analyseRoles(transcript));
+      assert.equal(after.ttl, '1h');
+      assert.equal(after.share, 1);
+    } finally {
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+});
+
+/**
+ * §V16 — a failing gate condition must name a command, not a sentence.
+ *
+ * `adjudicated-<round>` said *"re-record the adjudication against the current findings"*. When the
+ * round that orphaned those decisions is a replay that came back **clean**, there are no current
+ * findings to re-record against, so the remedy is not merely terse — it is a contradiction. Run 10
+ * met it and the director spent seven turns reading `verify-completion.mjs`, `state.mjs` and
+ * `adjudication-ledger.mjs` to work out that the answer was an empty array. Each of those turns is
+ * a director turn, which is the unit §V5 named as the dearest thing a run buys, and on the
+ * 5-minute cache each was a full context re-establishment (§V15).
+ *
+ * §S17 and §V13 are the lineage: every failing condition states what clears it. This is one more
+ * site where the rule was claimed and not implemented — §U's "count the sites", found by reading a
+ * real run's trace rather than the code.
+ */
+describe('§V16 — the orphaned-adjudication remedy is runnable', () => {
+  let TMP, PROJ, DATA_DIR, RUN, RUNDIR, ENV, condition;
+
+  before(() => {
+    TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-orphan-'));
+    PROJ = path.join(TMP, 'project');
+    DATA_DIR = path.join(TMP, 'data');
+    const fakeState = path.join(TMP, 'fake');
+    fs.mkdirSync(PROJ, { recursive: true });
+    fs.mkdirSync(fakeState, { recursive: true });
+    ENV = {
+      ...process.env,
+      HYPERPOWERS_DATA_ROOT: DATA_DIR,
+      CLAUDE_PLUGIN_ROOT: ROOT,
+      FAKE_STATE: fakeState,
+      // First call finds a blocker; the replay comes back clean. That is exactly the sequence that
+      // orphans a decision — and exactly what run 10's plan-2 did.
+      HYPERPOWERS_CODEX_BIN: writeFakeCodex(TMP, [
+        'if [ "$N" = "1" ]; then',
+        '  cat > "$OUT" <<\'JSON\'',
+        JSON.stringify({
+          verdict: 'blocker',
+          summary: 'The window boundary is unspecified across workers, which is the property the '
+            + 'design claims to guarantee.',
+          findings: [{
+            id: 'DESIGN-001',
+            severity: 'high',
+            category: 'concurrency',
+            location: 'design.md § Acceptance criteria, AC-2',
+            claim: 'Two workers may disagree on where the 60-second window starts, so a tenant '
+              + 'can exceed the budget at the seam between them.',
+            evidence: ['AC-2: the same budget is enforced identically across every worker process'],
+            recommendation: 'State the window as rolling over 60 seconds from the request instant.',
+            blocking: true,
+            confidence: 0.9,
+          }],
+          residual_risks: [],
+          coverage_notes: '',
+        }),
+        'JSON',
+        '  exit 0',
+        'fi',
+        'emit_review',
+      ].join('\n')),
+    };
+
+    const init = JSON.parse(execFileSync('node',
+      [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', PROJ, 'init', '--session', 'sess-orphan', '--description', 'rate limiting'],
+      { encoding: 'utf8', env: ENV }));
+    RUN = init.runId;
+    RUNDIR = init.runDir;
+    fs.writeFileSync(path.join(RUNDIR, 'request.md'), `# Request\n${'Add per-tenant rate limiting. '.repeat(12)}\n`);
+    fs.writeFileSync(path.join(RUNDIR, 'brainstorm-summary.md'), `# Consolidated need\n${'Per-tenant limits across every worker. '.repeat(8)}\n`);
+    fs.writeFileSync(path.join(RUNDIR, 'design.md'), FIXTURE_DESIGN);
+    setPhase(RUNDIR, 'DESIGN_REVIEW_1');
+
+    const codex = () => execFileSync('node',
+      [path.join(ROOT, 'scripts', 'codex-adversary.mjs'), '--project', PROJ, '--run', RUN, '--round', 'design-1'],
+      { encoding: 'utf8', env: ENV });
+    codex();
+
+    const decisions = path.join(RUNDIR, 'reports', 'decisions.json');
+    fs.mkdirSync(path.dirname(decisions), { recursive: true });
+    fs.writeFileSync(decisions, JSON.stringify([{
+      finding_id: 'DESIGN-001',
+      decision: 'accepted',
+      rationale: 'The boundary really is unspecified and two workers would disagree at the edge.',
+      correction_owner: 'opus',
+      required_change: 'State the window as rolling over 60 seconds from the request instant.',
+      verification: 'The design now says so in AC-1.',
+      escalate_to_fable: false,
+    }]));
+    execFileSync('node', [path.join(ROOT, 'scripts', 'adjudication-ledger.mjs'),
+      '--project', PROJ, '--run', RUN, 'record', '--round', 'design-1', '--file', decisions],
+    { encoding: 'utf8', env: ENV });
+
+    codex(); // the replay: clean, and DESIGN-001 no longer exists
+
+    const res = spawnSync('node', [path.join(ROOT, 'scripts', 'verify-completion.mjs'),
+      '--project', PROJ, '--run', RUN, '--gate', 'design'], { encoding: 'utf8', env: ENV });
+    condition = JSON.parse(res.stdout).conditions.find((c) => c.id === 'adjudicated-design-1');
+  });
+  after(() => { try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ } });
+
+  test('the condition still fails — a replay that erases a finding must not pass vacuously', () => {
+    assert.equal(condition?.status, 'fail', JSON.stringify(condition));
+    assert.match(condition.detail, /DESIGN-001/, 'the orphaned decision is named');
+  });
+
+  test('and it names the command that clears it', () => {
+    assert.match(condition.detail, /adjudication-ledger\.mjs record --round design-1 --file/,
+      `the remedy has to be runnable, not describable: ${condition.detail}`);
+  });
+
+  test('and says the file is empty when the current review has no findings', () => {
+    // The whole defect: "re-record against the current findings" when there are none.
+    assert.match(condition.detail, /no findings at all/, condition.detail);
+    assert.match(condition.detail, /\[\]/, condition.detail);
+  });
+});
+
+/**
+ * §V17 — the run installs its own 1-hour subagent cache, and gives it back.
+ *
+ * The product contract is *install the plugin, run `/hyperpowers:feature`, that is all*, so the
+ * setting §V15 found cannot be advice. What is pinned here is the part a unit test can reach: the
+ * file the run writes, what it preserves, and — the two that would otherwise ship silently — that
+ * **release writes `"0"` rather than deleting**, and that the deletion is a separate, later step.
+ *
+ * Both of those look like over-engineering until you know the measurement behind them: the harness
+ * re-applies settings with `Object.assign`, which never unsets, so a release that deleted the key
+ * would leave the live session on the 1-hour tier while reporting that it had reverted; and doing
+ * both writes at once reverts nothing, because the settings reload coalesces. A future
+ * simplification that collapses the two phases has to fail a test, not a review.
+ */
+describe('§V17 — the session cache is installed by the run and handed back', () => {
+  let PRIOR_DATA;
+  let PRIOR_CONFIG;
+  const mk = () => {
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-cache-'));
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-cache-data-'));
+    // The scope really is the *user* settings file: the project's `.claude/settings.local.json` was
+    // abandoned because the settings watch is established on `.claude/` at startup, so a repository
+    // without one never notices the write (§V17). `CLAUDE_CONFIG_DIR` is what makes that testable
+    // without touching the developer's own settings.
+    const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-cache-cfg-'));
+    process.env.HYPERPOWERS_DATA_ROOT = data;
+    // The explicit seam, which outranks the data root — these cases are about the settings file
+    // itself, so they name it rather than inheriting the sandbox's default location.
+    process.env.HYPERPOWERS_SETTINGS_FILE = path.join(cfg, 'settings.json');
+    return { proj, data, cfg };
+  };
+  const settingsOf = (cfg) => {
+    try { return JSON.parse(fs.readFileSync(path.join(cfg, 'settings.json'), 'utf8')); } catch { return null; }
+  };
+  const seed = (cfg, value) => {
+    fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify(value));
+  };
+  const lib = async () => import('../scripts/lib/session-settings.mjs');
+
+  before(() => { PRIOR_DATA = process.env.HYPERPOWERS_DATA_ROOT; PRIOR_CONFIG = process.env.HYPERPOWERS_SETTINGS_FILE; });
+  after(() => {
+    for (const [k, v] of [['HYPERPOWERS_DATA_ROOT', PRIOR_DATA], ['HYPERPOWERS_SETTINGS_FILE', PRIOR_CONFIG]]) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  test('engage creates the file with only its own key', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, subagentCacheState } = await lib();
+    const r = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    assert.equal(r.changed, true, r.reason);
+    assert.deepEqual(settingsOf(cfg), { env: { ENABLE_PROMPT_CACHING_1H: '1' } });
+    assert.equal(subagentCacheState(proj).on, true);
+  });
+
+  test('release writes "0" — it must not delete, because deleting does not unset process.env', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache } = await lib();
+    engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    const r = releaseSubagentCache(proj);
+    assert.equal(r.changed, true, r.reason);
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '0',
+      'the harness re-applies settings with Object.assign, which never unsets: removing the key '
+      + 'leaves the live session on the 1-hour tier while claiming it reverted');
+  });
+
+  test('the sweep is a second, later step and it leaves the project as it was found', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache, sweepSubagentCache } = await lib();
+    engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    releaseSubagentCache(proj);
+    // A live run anywhere in the project holds the setting: a second terminal must not take it away.
+    assert.equal(sweepSubagentCache(proj, { runActive: true }).changed, false);
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '0', 'still held');
+
+    assert.equal(sweepSubagentCache(proj, { runActive: false }).changed, true);
+    assert.equal(fs.existsSync(path.join(cfg, 'settings.json')), false,
+      'the file did not exist before the run, so nothing of ours may be left behind');
+  });
+
+  test('an existing settings file keeps every key the user put in it', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache, sweepSubagentCache } = await lib();
+    const original = { permissions: { allow: ['Bash(ls:*)'] }, env: { MY_OWN: 'keep' } };
+    seed(cfg, original);
+
+    engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    assert.equal(settingsOf(cfg).env.MY_OWN, 'keep');
+    assert.deepEqual(settingsOf(cfg).permissions, original.permissions);
+
+    releaseSubagentCache(proj);
+    sweepSubagentCache(proj, { runActive: false });
+    assert.deepEqual(settingsOf(cfg), original,
+      'a release must restore exactly, including a file it did not create');
+  });
+
+  test('a value somebody else changed is left alone rather than clobbered', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache } = await lib();
+    engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    // The user decides they want it permanently, in their own words.
+    seed(cfg, { env: { ENABLE_PROMPT_CACHING_1H: 'true' } });
+    const r = releaseSubagentCache(proj);
+    assert.equal(r.changed, false, r.reason);
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, 'true');
+  });
+
+  test('a value the user already set to "1" is not claimed, so it is never taken away', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache, sweepSubagentCache } = await lib();
+    seed(cfg, { env: { ENABLE_PROMPT_CACHING_1H: '1' } });
+    const r = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    assert.equal(r.changed, false);
+    assert.equal(r.already, true);
+    releaseSubagentCache(proj);
+    sweepSubagentCache(proj, { runActive: false });
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '1',
+      'the run never set it, so the run may not unset it');
+  });
+
+  test('malformed settings are declined, never rewritten', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache } = await lib();
+    const broken = '{ this is not json';
+    fs.writeFileSync(path.join(cfg, 'settings.json'), broken);
+    const r = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    assert.equal(r.changed, false);
+    assert.match(r.reason, /not valid JSON/);
+    assert.equal(fs.readFileSync(path.join(cfg, 'settings.json'), 'utf8'), broken);
+  });
+
+  test('the opt-out and the harness override are both honoured, and say which applied', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache } = await lib();
+    const off = engageSubagentCache(proj, { config: { cache: { subagent1h: false } }, runId: 'r1' });
+    assert.equal(off.changed, false);
+    assert.match(off.reason, /cache\.subagent1h/);
+    assert.equal(fs.existsSync(path.join(cfg, 'settings.json')), false);
+
+    // `FORCE_PROMPT_CACHING_5M` is tested before the enable inside the harness, so writing the file
+    // would produce a file that does nothing. Reporting beats pretending.
+    process.env.FORCE_PROMPT_CACHING_5M = '1';
+    try {
+      const forced = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+      assert.equal(forced.changed, false);
+      assert.match(forced.reason, /FORCE_PROMPT_CACHING_5M/);
+    } finally {
+      delete process.env.FORCE_PROMPT_CACHING_5M;
+    }
+  });
+
+  test('two runs in a row leave the settings file exactly as they found it', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache, sweepSubagentCache } = await lib();
+    const original = { env: { MY_OWN: 'keep' }, permissions: { allow: [] } };
+    seed(cfg, original);
+
+    // The second run engages while the first run's marker is still on disk at `phase: 'released'`
+    // and the file holds our own "0". Re-snapshotting the prior there would record **our** value as
+    // the user's and restore "0" forever after.
+    for (const runId of ['r1', 'r2']) {
+      const e = engageSubagentCache(proj, { config: {}, runId });
+      assert.equal(e.changed, true, e.reason);
+      assert.equal(e.wrote, true, `run ${runId} must actually move the file: ${e.reason}`);
+      assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '1');
+      assert.equal(releaseSubagentCache(proj, { runId }).changed, true);
+      assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '0');
+    }
+    assert.equal(sweepSubagentCache(proj, { runActive: false }).changed, true);
+    assert.deepEqual(settingsOf(cfg), original,
+      'after two runs the file must be byte-for-byte what the user had');
+  });
+
+  test('two live runs share the setting, and the first to finish does not take it away', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache } = await lib();
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-cache-other-'));
+
+    engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    engageSubagentCache(other, { config: {}, runId: 'r2' });
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '1');
+
+    // `r2` has no state file, so it is not live and does not hold. The refcount has to be able to
+    // say that, or a crashed run would keep the setting installed forever.
+    const first = releaseSubagentCache(proj, { runId: 'r1' });
+    assert.equal(first.changed, true, first.reason);
+
+    // Now with a genuinely live holder: its state file says a non-terminal phase.
+    const { projectDir } = await import('../scripts/lib/paths.mjs');
+    const liveRun = path.join(projectDir(other), 'runs', 'r3');
+    fs.mkdirSync(liveRun, { recursive: true });
+    fs.writeFileSync(path.join(liveRun, 'state.json'), JSON.stringify({ phase: 'EXECUTION' }));
+    engageSubagentCache(proj, { config: {}, runId: 'r4' });
+    engageSubagentCache(other, { config: {}, runId: 'r3' });
+    const held = releaseSubagentCache(proj, { runId: 'r4' });
+    assert.equal(held.changed, false, held.reason);
+    assert.match(held.reason, /still held/);
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '1',
+      'a run in another project is still using it');
+  });
+
+  test('a sandboxed run never touches the developer\'s own settings', () => {
+    // This shipped for one green run before it was caught: every test that drives `init` sandboxes
+    // the data root, nothing sandboxed the settings file, and the suite quietly added the key to
+    // the machine it was built on. The guard is the behaviour, not a convention to remember.
+    const real = path.join(os.homedir(), '.claude', 'settings.json');
+    const beforeBytes = fs.existsSync(real) ? fs.readFileSync(real) : null;
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-sandbox-'));
+    const proj = path.join(tmp, 'project');
+    fs.mkdirSync(proj, { recursive: true });
+    const sandboxEnv = { ...process.env, HYPERPOWERS_DATA_ROOT: path.join(tmp, 'data'), CLAUDE_PLUGIN_ROOT: ROOT };
+    delete sandboxEnv.HYPERPOWERS_SETTINGS_FILE;
+    delete sandboxEnv.CLAUDE_CONFIG_DIR;
+    const out = JSON.parse(execFileSync('node',
+      [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, 'init', '--session', 'sandbox', '--description', 'guard'],
+      { encoding: 'utf8', env: sandboxEnv }));
+    assert.ok(out.runId);
+
+    const afterBytes = fs.existsSync(real) ? fs.readFileSync(real) : null;
+    assert.equal(String(afterBytes), String(beforeBytes),
+      'a run in a sandboxed data root must not write the real ~/.claude/settings.json');
+    assert.ok(fs.existsSync(path.join(tmp, 'data', 'settings.json')),
+      'it must land inside the sandbox instead, or the engage silently did nothing');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // §V20. `writeSettings` threw, and `cmdInit` called it under a comment reading "Never fatal".
+  // With `~/.claude/` unwritable the director's *first tool call* died on an uncaught EACCES — no
+  // run at all, which is worse than the 5-minute tier it was meant to degrade to. 729 tests were
+  // green: every one of them could write its sandbox. Behaviour, not a convention, because the
+  // convention is what failed.
+  const unwritable = (cfg) => {
+    fs.chmodSync(cfg, 0o500);
+    return () => fs.chmodSync(cfg, 0o700);
+  };
+
+  test('an unwritable settings directory degrades the run, it does not end it', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache } = await lib();
+    const restore = unwritable(cfg);
+    try {
+      const r = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+      assert.equal(r.changed, false);
+      assert.match(r.reason, /could not be written/);
+    } finally { restore(); }
+  });
+
+  test('every verb that writes returns a reason instead of throwing', async () => {
+    const { proj, cfg } = mk();
+    const { engageSubagentCache, releaseSubagentCache, sweepSubagentCache } = await lib();
+    assert.equal(engageSubagentCache(proj, { config: {}, runId: 'r1' }).changed, true);
+    const restore = unwritable(cfg);
+    try {
+      // The claim must survive a failed release or sweep: the marker is what tells the next sweep
+      // there is still something to undo, so dropping it would strand `"1"` exactly when the write
+      // is failing.
+      for (const call of [
+        () => releaseSubagentCache(proj, { runId: 'r1' }),
+        () => sweepSubagentCache(proj, {}),
+      ]) {
+        const r = call();
+        assert.equal(r.changed, false);
+        assert.match(r.reason, /could not be written/);
+      }
+    } finally { restore(); }
+  });
+
+  test('the undo record is written before the change it undoes', async () => {
+    const { proj, data, cfg } = mk();
+    const { engageSubagentCache } = await lib();
+    // Marker unwritable, settings writable: nothing may move. The reverse order would have put
+    // `"1"` in the user's config with no record of how to take it back.
+    fs.mkdirSync(path.join(data, 'session-cache.json'), { recursive: true });
+    const r = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    assert.equal(r.changed, false);
+    assert.match(r.reason, /undo record not written/);
+    assert.equal(settingsOf(cfg), null, 'settings must be untouched when the undo cannot be recorded');
+  });
+
+  // §V21. `abort` reaches a terminal phase without going through the CLI `transition` verb, and so
+  // does the subagent controller's forced BLOCKED. The release was wired to the verb, so run 11 was
+  // aborted with `"1"` still in the live session. Counting the sites is the test: every path to a
+  // terminal phase goes through `transition()`, so that is where the release belongs.
+  test('the release is in transition(), not in one of the verbs that call it', async () => {
+    const state = fs.readFileSync(path.join(ROOT, 'scripts', 'lib', 'state.mjs'), 'utf8');
+    assert.match(state, /releaseSubagentCache/, 'transition() must hand the cache back');
+    const machine = fs.readFileSync(path.join(ROOT, 'scripts', 'state-machine.mjs'), 'utf8');
+    const code = machine.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    assert.doesNotMatch(code, /releaseSubagentCache/,
+      'a verb-level release is one of three paths; the other two would silently keep the setting');
+  });
+
+  test('aborting hands the setting back', () => {
+    const { proj, data, cfg } = mk();
+    // The real verbs as a subprocess, because `abort` is the path that failed and asserting on
+    // anything else would prove a different thing.
+    const cli = (args) => JSON.parse(execFileSync('node', [path.join(ROOT, 'scripts', 'state-machine.mjs'), '--project', proj, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, HYPERPOWERS_DATA_ROOT: data, HYPERPOWERS_SETTINGS_FILE: path.join(cfg, 'settings.json'), CLAUDE_PLUGIN_ROOT: ROOT },
+    }));
+    const runId = cli(['init', '--session', 'sess-abort', '--description', 'abort fixture']).runId;
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '1', 'init engages');
+    cli(['--run', runId, 'abort', '--reason', 'stopping the run for the test']);
+    assert.equal(settingsOf(cfg).env.ENABLE_PROMPT_CACHING_1H, '0',
+      'a terminal phase reverts the live session, whichever verb got there');
+  });
+
+  test('the project settings file is named once, and is not what this writes to', async () => {
+    const { LOCAL_SETTINGS, HYPERPOWERS_OWN_FILES } = await import('../scripts/lib/workspace.mjs');
+    const { userSettingsPath } = await lib();
+    assert.equal(LOCAL_SETTINGS, '.claude/settings.local.json');
+    assert.ok(HYPERPOWERS_OWN_FILES.includes(LOCAL_SETTINGS));
+    // The scope is the user file. A project-scoped write is silently ineffective in a repository
+    // that has no `.claude/` at session start, which is the measurement that moved it (§V17).
+    assert.doesNotMatch(userSettingsPath(), /settings\.local\.json$/);
+    assert.match(userSettingsPath(), /settings\.json$/);
+    // Structural, not textual: the docstring names the project path precisely to explain why it is
+    // not used, so grepping for the string would fail on the explanation. What must stay true is
+    // that no code path resolves one — the module never imports the project-scope constant, and the
+    // only file it targets is derived from `userSettingsPath()`.
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'lib', 'session-settings.mjs'), 'utf8');
+    assert.doesNotMatch(src, /import[^\n]*LOCAL_SETTINGS/,
+      'writing into a project would reopen spec §20; the user file is outside every project');
+    assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''),
+      /settings\.local\.json/, 'no code path may resolve the project-scoped settings file');
+  });
+});
+
+// §V24. Condition 14 verified that a URL existed, never that the page drew anything — so run 12
+// published a diagram that reached its reader as a wall of truncated source. These are the three
+// forms that broke it, each rejected by the shape that broke, not by a grammar nobody can maintain.
+describe('§V24 — a diagram that will not render is refused before it is published', () => {
+  test('the three forms that broke run 12 are rejected', async () => {
+    const { lintMermaid } = await import('../scripts/lib/mermaid.mjs');
+    assert.match(lintMermaid('A["one\\ntwo"]')[0], /<br\/>/, 'Mermaid has no \\n escape');
+    assert.match(lintMermaid('A["say \\"hi\\""]')[0], /#quot;/, 'a quote ends the label');
+    assert.match(lintMermaid('A["has # inside"]')[0], /#35;/, '# opens an entity code');
+  });
+
+  test('what runs 8 and 9 published is accepted, and so is a hex colour', async () => {
+    const { lintMermaid } = await import('../scripts/lib/mermaid.mjs');
+    assert.deepEqual(lintMermaid('A["CSV document<br/>(spreadsheet export)"] --> B["Rows"]'), []);
+    // `#` outside a label is legitimate — rejecting `fill:#f9f` would make the guard a nuisance.
+    assert.deepEqual(lintMermaid('A["plain"]\nstyle A fill:#f9f,stroke:#333'), []);
+    assert.deepEqual(lintMermaid('A["escaped #quot;quote#quot; and #35;hash"]'), []);
+  });
+
+  test('the source is recovered from both containers, so an HTML page keeps its diagram.mmd', async () => {
+    const { extractMermaid } = await import('../scripts/lib/mermaid.mjs');
+    assert.equal(extractMermaid('# t\n\n```mermaid\nflowchart TD\n  A --> B\n```\n'), 'flowchart TD\n  A --> B');
+    assert.equal(extractMermaid('<h1>t</h1>\n<pre class="mermaid">flowchart TD\n  A --> B</pre>'), 'flowchart TD\n  A --> B');
+    assert.equal(extractMermaid('<div class="wrap"><pre class="diagram mermaid">graph LR\n X</pre></div>'), 'graph LR\n X');
+    assert.equal(extractMermaid('<p>no diagram here</p>'), null);
+  });
+
+  test('both instruction sites ask for the container the renderer recognises', () => {
+    for (const f of ['agents/hyperpowers-director.md', 'scripts/lib/phases.mjs']) {
+      const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+      assert.match(src, /pre class="mermaid"/, `${f} must name the HTML container`);
+      assert.match(src, /overflow-x/, `${f} must require the scroll container that truncation needs`);
+    }
+  });
+});
+
+// §V25. An external review of the §V20–§V24 change set. Five findings against the one file this
+// plugin writes outside its own data root — where a mistake costs the user their global config.
+describe('§V25 — the user settings file is handed back exactly as it was found', () => {
+  let PRIOR_DATA, PRIOR_CONFIG;
+  const mk = () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hp-v25-'));
+    const proj = path.join(tmp, 'project');
+    fs.mkdirSync(proj, { recursive: true });
+    process.env.HYPERPOWERS_DATA_ROOT = path.join(tmp, 'data');
+    process.env.HYPERPOWERS_SETTINGS_FILE = path.join(tmp, 'settings.json');
+    return { tmp, proj, file: path.join(tmp, 'settings.json') };
+  };
+  const lib = () => import('../scripts/lib/session-settings.mjs');
+
+  before(() => { PRIOR_DATA = process.env.HYPERPOWERS_DATA_ROOT; PRIOR_CONFIG = process.env.HYPERPOWERS_SETTINGS_FILE; });
+  after(() => {
+    for (const [k, v] of [['HYPERPOWERS_DATA_ROOT', PRIOR_DATA], ['HYPERPOWERS_SETTINGS_FILE', PRIOR_CONFIG]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  test('a restrictive mode survives the write', async () => {
+    const { proj, file } = mk();
+    fs.writeFileSync(file, JSON.stringify({ model: 'opus' }));
+    fs.chmodSync(file, 0o600);
+    const { engageSubagentCache } = await lib();
+    assert.equal(engageSubagentCache(proj, { config: {}, runId: 'r1' }).changed, true);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'a 0600 config must not become world-readable');
+  });
+
+  test('a symlinked settings file stays a symlink', async () => {
+    const { tmp, proj, file } = mk();
+    const real = path.join(tmp, 'dotfiles.json');
+    fs.writeFileSync(real, JSON.stringify({ model: 'opus' }));
+    fs.symlinkSync(real, file);
+    const { engageSubagentCache } = await lib();
+    assert.equal(engageSubagentCache(proj, { config: {}, runId: 'r1' }).changed, true);
+    assert.ok(fs.lstatSync(file).isSymbolicLink(), 'replacing the link severs the user’s dotfile manager');
+    assert.equal(JSON.parse(fs.readFileSync(real, 'utf8')).env.ENABLE_PROMPT_CACHING_1H, '1',
+      'and the write must land on the target, not beside it');
+  });
+
+  test('an unreadable settings file is left alone, not rewritten from scratch', async () => {
+    const { proj, file } = mk();
+    fs.writeFileSync(file, JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(ls:*)'] } }));
+    fs.chmodSync(file, 0o000);
+    const { engageSubagentCache } = await lib();
+    const r = engageSubagentCache(proj, { config: {}, runId: 'r1' });
+    fs.chmodSync(file, 0o644);
+    assert.equal(r.changed, false, 'a file we cannot read is one we must not replace');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')),
+      { model: 'opus', permissions: { allow: ['Bash(ls:*)'] } }, 'every key the user had survives');
+  });
+
+  test('every spelling the harness honours counts as the user’s own', async () => {
+    for (const spelling of ['1', 'true', 'YES', 'on']) {
+      const { proj, file } = mk();
+      fs.writeFileSync(file, JSON.stringify({ env: { ENABLE_PROMPT_CACHING_1H: spelling } }));
+      const { engageSubagentCache, releaseSubagentCache } = await lib();
+      assert.equal(engageSubagentCache(proj, { config: {}, runId: 'r1' }).already, true, `"${spelling}" is the user’s`);
+      releaseSubagentCache(proj, { runId: 'r1' });
+      assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).env.ENABLE_PROMPT_CACHING_1H, spelling,
+        `releasing must not switch off a setting the user had enabled as "${spelling}"`);
+    }
+  });
+
+  test('the published page is what gets linted, not the flag beside it', () => {
+    // Behavioural coverage would need a run driven to FINAL_ACCEPTANCE, which no unit fixture
+    // reaches; what is asserted here is the ordering that made the lint bypassable — `--source`
+    // was consulted first, so the common path validated a string nobody publishes.
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'state-machine.mjs'), 'utf8');
+    const body = /function persistDiagramSource[\s\S]*?\n}/.exec(src)[0];
+    assert.ok(body.indexOf('extractMermaid') < body.indexOf('flags.source'),
+      'the page must be read before the flag, or a valid flag rides along with a broken page');
+    assert.match(body, /lintMermaid/, 'and the result must be linted');
   });
 });

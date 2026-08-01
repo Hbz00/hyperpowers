@@ -32,13 +32,14 @@
  *     progress bar vanish. `fitRight()` never sees a colour.
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { activeRunId, artifacts } from './lib/paths.mjs';
-import { bareAgentName, isDirectorMeta } from './lib/config.mjs';
-import { subagentMeta, analyseTranscript } from './lib/transcript.mjs';
+import { bareAgentName, isDirectorMeta, loadConfig, quietWarnMs } from './lib/config.mjs';
+import { subagentMeta, analyseTranscript, lastWriteAt } from './lib/transcript.mjs';
 import { descendantsOf, byDepth, foldKinds } from './lib/agent-tree.mjs';
 import { runProgress } from './lib/progress.mjs';
-import { readJson } from './lib/io.mjs';
+import { pendingErrand } from './lib/state.mjs';
 
 /**
  * Block Elements, and that choice is load-bearing: they are unambiguous-width, so `.length` is
@@ -56,15 +57,6 @@ const SEP = '  ';
 /** The bar we want, and the narrowest one still worth drawing. Below `BAR_MIN` it is noise. */
 const BAR_MAX = 24;
 const BAR_MIN = 8;
-
-/**
- * Warn when the run has mutated nothing for this long. The longest a healthy agent went without
- * writing a message across every recorded run is 17.7 minutes, and state moves more often than
- * transcripts do — so half an hour of silence is not "a long phase", it is the signature of run
- * 9b: a director wedged inside a dispatch no hook will ever sample, on the one surface that keeps
- * ticking. The row cannot fix it; the human it warns can (`/hyperpowers:abort`, or TaskStop).
- */
-const IDLE_WARN_MS = 30 * 60 * 1000;
 
 /**
  * Colour marks **state**, never structure.
@@ -132,10 +124,87 @@ function shortKind(meta) {
  * `(+N)` suffix this decoration displaces.
  */
 function rosterText(descendants) {
-  if (!descendants.length) return { text: null, short: null };
+  if (!descendants.length) return null;
   const levels = byDepth(descendants)
     .map(({ entries }) => foldKinds(entries.map((e) => shortKind(e.meta))).join(' '));
   return { text: `↳ ${levels.join(' › ')}`, short: `↳${descendants.length}` };
+}
+
+/**
+ * A Codex round in flight, from the two files the adapter already writes.
+ *
+ * `<round>.prompt.md` lands when the round starts and `<round>.md.<model>.last.json` when it
+ * returns, so a prompt without its answer *is* a round in progress — no new producer, and the
+ * prompt's mtime is when it began. Codex runs through Bash rather than as a subagent, so nothing
+ * appears in the roster and the row was simply frozen for the duration: 22 minutes across one run's
+ * four rounds, and the longest single silence any run has produced (§V22).
+ *
+ * Bounded by twice the Codex timeout so a prompt orphaned by a crash cannot claim a round is still
+ * running hours later — the same reason the child registry expires.
+ */
+function codexRound(packsDir, timeoutMs, reviewsDir = null) {
+  let files;
+  try { files = fs.readdirSync(packsDir); } catch { return null; }
+  const floor = Date.now() - Math.max(1, timeoutMs) * 2;
+  let best = null;
+  for (const file of files) {
+    if (!file.endsWith('.prompt.md')) continue;
+    const round = file.slice(0, -'.prompt.md'.length);
+    if (files.some((f) => f.startsWith(`${round}.md.`) && f.endsWith('.last.json'))) continue;
+    // A *failed* attempt writes no `.last.json` — the adapter judges success by that file's
+    // existence — so the prompt alone would report the round as still running for twice the
+    // timeout, on a run that has already gone to BLOCKED. The review record is written on both
+    // paths, success and failure, so it is the completion signal that covers both.
+    if (reviewsDir && fs.existsSync(path.join(reviewsDir, `${round}.json`))) continue;
+    let at;
+    try { at = fs.statSync(path.join(packsDir, file)).mtimeMs; } catch { continue; }
+    if (at < floor) continue;
+    if (!best || at > best.at) best = { round, at };
+  }
+  if (!best) return null;
+  return { text: `⟳ codex ${best.round} ${human(Date.now() - best.at)}`, short: `⟳ ${best.round}`, tint: CYAN };
+}
+
+/**
+ * One cell answers "what is happening right now", because the four candidates are one question.
+ *
+ * They are also near-exclusive in practice — Codex runs in Bash so it excludes the roster, and a
+ * parked errand means nothing is running at all — so giving each its own cell would spend width on
+ * combinations that do not occur, on a row that is already eight cells wide.
+ *
+ * The order is not a preference, it is what each state costs a human who reads it wrong:
+ *
+ *  1. **An errand outranks everything and can never be overridden.** Run `vv1ffc` sat **5h14** in
+ *     `FINAL_ACCEPTANCE` with a parked Artifact publication and then completed. Every silence-based
+ *     rule calls that a stalled run; it was a run waiting for its owner, fifteen seconds of human
+ *     action from `COMPLETE`, and a warning saying "abort" would have destroyed it.
+ *  2. **Silence overrides the three "something is running" states**, because in the stall §V8
+ *     measured the delegates were still *registered* while being dead. What is running is a claim;
+ *     what has written is a fact.
+ *  3. Then the ordinary answers, most-blocking first: a failing gate stops the phase, a Codex round
+ *     is the run's longest legitimate pause, and the roster is the healthy case.
+ */
+function activityCell({ errand, quietMs, quietLimit, failing, codex, roster }) {
+  if (errand) {
+    const what = errand.kind === 'question' ? `${errand.questions?.length ?? 1} question(s)` : 'publish';
+    return { text: `⏸ waiting for you — ${what}`, short: '⏸ waiting', tint: YELLOW, bold: true };
+  }
+  if (quietMs !== null && quietMs >= quietLimit) {
+    return {
+      text: `⚠ nothing has written for ${human(quietMs)} — /hyperpowers:status, or abort`,
+      short: `⚠ quiet ${human(quietMs)}`,
+      tint: YELLOW,
+      bold: true,
+    };
+  }
+  if (failing) {
+    return {
+      text: `⛔ gate ${failing.name}${failing.ratio ? ` ${failing.ratio}` : ''}`,
+      short: `⛔ ${failing.name}`,
+      tint: RED,
+    };
+  }
+  return codex ?? roster ?? null;
 }
 
 const cellText = (cell, short) => (short && cell.short) || cell.text;
@@ -176,33 +245,29 @@ function fitRight(cells, budget) {
  * work rather than undoing it — see `lib/progress.mjs`. Showing the retreats separately keeps that
  * honest instead of hiding it.
  */
-function directorRow(progress, task, columns, costUsd, descendants) {
-  const started = Date.parse(task?.startTime ?? '');
-  const idle = progress.staleMs !== null && progress.staleMs >= IDLE_WARN_MS && !progress.terminal;
+function directorRow(progress, activity, columns, costUsd) {
+  const alarming = activity?.tint === YELLOW || activity?.tint === RED;
   const tone = progress.phase === 'COMPLETE' ? GREEN
     : progress.terminal ? RED
-      : idle ? YELLOW : CYAN;
-  const roster = rosterText(descendants);
+      : alarming ? YELLOW : CYAN;
 
   const cells = [
     { drop: 0, text: `${String(progress.percent).padStart(3)}%`, tint: tone },
-    // Ranked **above** the phase name, and that ordering was chosen against a measurement rather
-    // than a taste: at 40 columns the other way round rendered `63%  EXECUTION` and dropped the
-    // warning, which is the one cell on the row a human can act on. A phase name they cannot act on
-    // is not worth the width during a wedge.
-    {
-      drop: 1,
-      text: idle ? `⚠ idle ${human(progress.staleMs)} — run may be wedged; /hyperpowers:abort to stop` : null,
-      short: idle ? `⚠ idle ${human(progress.staleMs)}` : null,
-      tint: YELLOW,
-      bold: true,
-    },
+    // Position and drop rank are independent, and both are deliberate.
+    //
+    // It sits **after the phase** and always in the same place: the cell has five states, and one
+    // that moved between them would make the row jump as a run changed — a slot that moves is not a
+    // slot. Reading "phase, then what is happening inside it" is also the order the facts relate in.
+    //
+    // It is ranked **above** the phase name it follows, and that came from a measurement rather than
+    // a taste: at 40 columns the other order rendered `63%  EXECUTION` and dropped the warning, the
+    // one cell on the row a human can act on. A phase name they cannot act on is not worth the width.
     { drop: 2, text: progress.phase },
+    { drop: 1, ...(activity ?? {}) },
     { drop: 3, text: progress.retries ? `↻${progress.retries}` : null },
     { drop: 4, text: progress.tasks ? `${progress.tasks.accepted}/${progress.tasks.total} wp` : null },
-    { drop: 5, text: Number.isFinite(started) ? human(Date.now() - started) : null },
+    { drop: 5, text: progress.ageMs === null ? null : human(progress.ageMs) },
     { drop: 6, text: typeof costUsd === 'number' ? `$${costUsd.toFixed(2)}` : null },
-    { drop: 7, text: roster.text, short: roster.short },
   ];
 
   const usable = columns || 120;
@@ -268,15 +333,48 @@ function render(payload) {
   // did not enforce. Memoised on (size, mtime) with a persisted cache, so the 5 s tick pays the
   // full transcript scan once per change, not once per tick; failure means no cost cell, never a
   // broken row.
+  const a = artifacts(projectRoot, runId);
   let costUsd = null;
   try {
     if (payload.transcript_path) {
-      const a = artifacts(projectRoot, runId);
-      const since = readJson(a.state, null)?.createdAt ?? null;
-      const usage = analyseTranscript(payload.transcript_path, { since, cacheDir: path.join(a.base, '.cache') });
+      const usage = analyseTranscript(payload.transcript_path,
+        { since: progress.createdAt, cacheDir: path.join(a.base, '.cache') });
       if (usage?.available) costUsd = usage.totals.costUsd;
     }
   } catch { /* the row renders without the number */ }
+
+  // What is happening right now — one answer, five candidates, resolved by `activityCell`.
+  const safely = (fn) => { try { return fn(); } catch { return null; } };
+
+  // The errand is read on its own, outside the block below, because it is the one state that must
+  // never be lost: it is documented as un-overridable precisely because a run that is *waiting for
+  // its owner* looks identical to a stalled one, and telling somebody to abort it destroys it
+  // (§V22). A malformed `.hyperpowers.json` making `loadConfig` throw must not take it down with
+  // the rest.
+  const errand = safely(() => pendingErrand(projectRoot, runId));
+
+  // Silence is measured as **the most recent write anywhere**, not as `state.updatedAt`. A director
+  // inside a synchronous dispatch mutates nothing for as long as the dispatch runs, so the state
+  // stamp alone reported 45 minutes of "wedged" while an adjudicator was writing that same second
+  // (§V22). Every input is something somebody already writes for another reason.
+  const activity = safely(() => {
+    const config = loadConfig(projectRoot);
+    // `null` from `lastWriteAt` means *we could not check*, never *nothing wrote*. Falling back to
+    // `progress.staleMs` here would quietly restore the very definition §V22 removed, on the one
+    // path where nobody would notice — so a run whose writes cannot be read is never called quiet.
+    const written = lastWriteAt(payload.transcript_path, [directorId, ...ours]);
+    const quietMs = written === null || progress.terminal
+      ? null
+      : Math.min(progress.staleMs ?? Infinity, Date.now() - written);
+    return activityCell({
+      errand,
+      quietMs: Number.isFinite(quietMs) ? quietMs : null,
+      quietLimit: quietWarnMs(config),
+      failing: progress.failingGate,
+      codex: codexRound(a.packsDir, config.codex.timeoutMs, a.reviewsDir),
+      roster: rosterText(descendants),
+    });
+  }) ?? (errand ? activityCell({ errand }) : null);
 
   const lines = [];
   for (const task of Object.values(payload.tasks ?? {})) {
@@ -287,7 +385,7 @@ function render(payload) {
     // stamped `HP·…` and given a description we had no claim over. Omitting the id leaves the
     // harness's own rendering in place, which is the correct answer for somebody else's agent.
     const content = task.id === directorId
-      ? directorRow(progress, task, payload.columns, costUsd, descendants)
+      ? directorRow(progress, activity, payload.columns, costUsd)
       : ours.has(task.id) ? workerRow(meta, task) : null;
     if (content) lines.push(JSON.stringify({ id: task.id, content }));
   }

@@ -18,6 +18,7 @@ import { validate } from './validate.mjs';
 import { PHASES, ALL_ROUNDS, canTransition, isKnownPhase, isTerminal, phaseIndex } from './phases.mjs';
 import { excludeOwnFiles } from './workspace.mjs';
 import { directorTier, childAgents, directorSubagent } from './transcript.mjs';
+import { releaseSubagentCache } from './session-settings.mjs';
 import { logEvent } from './telemetry.mjs';
 
 export const STATE_SCHEMA_VERSION = 1;
@@ -434,7 +435,7 @@ export function checkGate(projectRoot, runId, state, phase = state.phase) {
  * must be able to reach unconditionally (BLOCKED and friends).
  */
 export function transition(projectRoot, runId, to, meta = {}) {
-  return mutateState(projectRoot, runId, (state) => {
+  const next = mutateState(projectRoot, runId, (state) => {
     const from = state.phase;
     if (!isKnownPhase(to)) throw new Error(`Unknown target phase '${to}'`);
     if (from === to) return state;
@@ -534,6 +535,18 @@ export function transition(projectRoot, runId, to, meta = {}) {
     logEvent(projectRoot, runId, { type: 'transition', ...entry });
     return state;
   });
+
+  // Hand the 1-hour subagent cache back here, not in the CLI verb that happened to be first.
+  // Three paths reach a terminal phase — `state-machine transition`, `state-machine abort`, and
+  // the subagent controller's forced `BLOCKED` — and the release was wired to one of them. Run 11
+  // was aborted and the setting stayed `"1"` in the live session, exactly §U's shape: a rule
+  // stated once and implemented in a third of the places it names. Below the lock so the terminal
+  // phase is on disk first; `SUSPENDED` is not terminal, so a resumable run keeps its cache.
+  if (isTerminal(next.phase)) {
+    const released = releaseSubagentCache(projectRoot, { runId });
+    logEvent(projectRoot, runId, { type: 'subagent_cache', action: 'release', changed: released.changed, reason: released.reason });
+  }
+  return next;
 }
 
 /**

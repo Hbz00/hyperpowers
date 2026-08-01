@@ -337,13 +337,27 @@ function checkReviewCycle(artifact) {
     // against what the current attempt actually reported.
     const known = new Set(review.findings.map((f) => f.id));
     const orphaned = decisions.filter((d) => !known.has(d.finding_id)).map((d) => d.finding_id);
+    // The remedy has to be runnable, and this one was not.
+    //
+    // "re-record the adjudication against the current findings" is a contradiction when the re-run
+    // left **no** findings to record against, which is exactly the shape that reaches this branch:
+    // a replayed round comes back clean and its old decisions are orphaned. Run 10 hit it and the
+    // director spent seven turns reading `verify-completion.mjs`, `state.mjs` and
+    // `adjudication-ledger.mjs` to discover that the answer was an empty array — turns that cost a
+    // full context re-establishment each (§V15). §S17 and §V13 named the rule this file lives by:
+    // every failing condition states the command that clears it. This one stated a sentence.
+    const clearCmd = `adjudication-ledger.mjs record --round ${round} --file <decisions.json>`;
     add(`adjudicated-${round}`, `Every ${round} finding adjudicated`,
       undecided.length || orphaned.length ? 'fail' : 'pass',
       undecided.length || orphaned.length
-        ? `${undecided.length ? `undecided: ${undecided.join(', ')}. ` : ''}`
+        ? `${undecided.length ? `undecided: ${undecided.join(', ')}. Record a decision for each with `
+            + `\`${clearCmd}\`. ` : ''}`
           + `${orphaned.length ? `decisions for findings absent from the current review (a re-run `
-            + `replaced it): ${orphaned.join(', ')} — re-record the adjudication against the `
-            + `current findings` : ''}`
+            + `replaced it): ${orphaned.join(', ')}. Re-record the round against what the current `
+            + `review says, with \`${clearCmd}\` — \`record\` replaces the round wholesale`
+            + `${known.size === 0
+              ? `, and the current review has no findings at all, so the file is the empty array \`[]\``
+              : ` (${known.size} finding(s) to decide: ${[...known].join(', ')})`}` : ''}`
         : `${decisions.length} decisions recorded`);
 
     // Every unresolved decision, not only the accepted ones.

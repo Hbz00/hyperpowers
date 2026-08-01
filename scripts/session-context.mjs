@@ -19,6 +19,7 @@
 
 import { runHook, emitContext, emitAllowStop, projectRootFrom } from './lib/hookio.mjs';
 import { listRuns, activeRunId, artifacts, markDataRootAuthoritative } from './lib/paths.mjs';
+import { sweepSubagentCache } from './lib/session-settings.mjs';
 import { tryLoadState } from './lib/state.mjs';
 import { PHASES, isTerminal } from './lib/phases.mjs';
 
@@ -55,6 +56,18 @@ await runHook(
         return state && !isTerminal(state.phase);
       }) ?? null;
     }
+
+    // Phase two of the session-cache release, and the self-healing half: it is here because a
+    // fresh process is the only place removing the key is safe, and because a crashed run never
+    // reached phase one (`session-settings.mjs`; §V8 for why one hook is not a guarantee).
+    //
+    // Gated on nothing being live *anywhere* in the project, not merely in this session: a second
+    // terminal opened during a run must not take the setting away from the run using it.
+    const liveRun = listRuns(projectRoot).some((candidate) => {
+      const state = tryLoadState(projectRoot, candidate);
+      return state && !isTerminal(state.phase);
+    });
+    sweepSubagentCache(projectRoot, { runActive: liveRun });
 
     if (!runId) return emitAllowStop();
 

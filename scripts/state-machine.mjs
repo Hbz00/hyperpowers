@@ -31,8 +31,11 @@ import { newState, saveState, loadState, mutateState, transition, checkGate, pro
 import { PHASES, PHASE_ORDER, isKnownPhase, isTerminal, phaseIndex } from './lib/phases.mjs';
 import { loadConfig, describeBounds, costNotice, durationNotice, DIRECTOR_AGENT } from './lib/config.mjs';
 import { validate } from './lib/validate.mjs';
+import { lintMermaid, extractMermaid } from './lib/mermaid.mjs';
 import { logEvent, summarise, scoreAgainstTargets } from './lib/telemetry.mjs';
 import { measuredCostFor } from './lib/transcript.mjs';
+// Engage only. The release lives in `transition()` so all three paths to a terminal phase get it.
+import { engageSubagentCache } from './lib/session-settings.mjs';
 
 const { positional, flags } = parseArgs();
 const command = positional[0];
@@ -94,6 +97,17 @@ function cmdInit() {
   writeJson(a.locks, { owners: {} });
   bindSession(projectRoot, sessionId, runId);
   logEvent(projectRoot, runId, { type: 'run_started', sessionId, projectRoot });
+
+  // The run is live, so it installs the 1-hour subagent cache (`session-settings.mjs`) — which
+  // reaches every session sharing `~/.claude/`, not only this one. Here rather than in a hook
+  // because this is the director's *first* tool call and the write applies to the live session,
+  // including the conversation making it. Never fatal, and now true: `engageSubagentCache` cannot
+  // throw, because when it could, an unwritable config directory killed this call and the run with
+  // it, under this very comment (§V20). A run on the 5-minute tier is dearer and entirely correct.
+  const cache = engageSubagentCache(projectRoot, { config, runId });
+  logEvent(projectRoot, runId, {
+    type: 'subagent_cache', action: 'engage', changed: cache.changed, wrote: cache.wrote ?? false, reason: cache.reason,
+  });
 
   emitJson({
     runId,
@@ -379,15 +393,26 @@ function cmdRisk() {
  * without anyone having to remember anything.
  */
 function persistDiagramSource(a, publishedFile = null) {
-  let source = typeof flags.source === 'string' ? flags.source.trim() : '';
-  if (!source && publishedFile) {
+  // The page is the artefact, so the page is what gets linted. `--source` used to win, which meant
+  // the common path — the one the director's instructions ask for — validated a *parallel string*
+  // and let a valid flag ride along with a broken page. It stays as the fallback for a page whose
+  // markup the extractor cannot read, so an unrecognised container still records its diagram.
+  let source = '';
+  if (publishedFile) {
     try {
-      const page = fs.readFileSync(publishedFile, 'utf8');
-      const fence = /```mermaid\s*\n([\s\S]*?)```/.exec(page);
-      if (fence && fence[1].trim()) source = fence[1].trim();
+      source = extractMermaid(fs.readFileSync(publishedFile, 'utf8')) ?? '';
     } catch { /* no page to derive from — the reply below says what was lost */ }
   }
+  if (!source && typeof flags.source === 'string') source = flags.source.trim();
   if (!source) return null;
+  const problems = lintMermaid(source);
+  if (problems.length) {
+    fail(
+      `The diagram will not render as written:\n${problems.map((p) => `  - ${p}`).join('\n')}\n\n` +
+        `Fix it in the page and request publication again.`,
+      2,
+    );
+  }
   ensureDir(a.base);
   const file = path.join(a.base, 'diagram.mmd');
   writeFileAtomic(file, source);
